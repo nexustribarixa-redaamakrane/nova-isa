@@ -6,12 +6,13 @@ the compiler is built. It is kept in sync with `docs/PORTING_READINESS.md`.
 
 The ISA remains frozen at `Nova ISA v1.0`. Phase 1 adds software only.
 
-**Current progress:** Milestones 1–5 are complete (foundation, preprocessor,
-parser/AST, type system + semantic analysis, and Nova64 code generation).
-Milestones 6–7 (compiler driver/toolchain integration and runtime/libnova/
-validation) remain pending. **Phase 2 is not authorized until all seven
-milestones are complete, tested, documented, and committed.** Subtasks are
-internal stages and must not become additional major milestones.
+**Current progress (6 of 7 milestones complete):** Milestones 1–6 are complete
+(foundation, preprocessor, parser/AST, type system + semantic analysis, Nova64
+code generation, and the compiler driver/toolchain integration). Milestone 7
+(runtime, libnova and end-to-end validation) remains pending. **Phase 2 is not
+authorized until all seven milestones are complete, tested, documented, and
+committed.** Subtasks are internal stages and must not become additional major
+milestones.
 
 ## 1. Pipeline
 
@@ -34,8 +35,9 @@ young. The current product emits **real Nova assembly** and goes through the
 existing tools; it does not contain a second binary encoder. Milestone 5 adds a
 complete lowering pass from the semantically analysed AST to assembly, exercised
 end-to-end through `assemble_object`, `link_objects`, and the reference
-emulator. There is still no driver/CLI (Milestone 6) and no runtime library
-(Milestone 7).
+emulator. Milestone 6 adds the `nova-cc` driver, which orchestrates those
+existing stages and writes `.i`, `.s`, `.nobj`, and `.nob` artifacts. There is
+still no runtime library (Milestone 7).
 
 ### Why direct lowering instead of a separate SSA IR
 
@@ -59,11 +61,10 @@ builder would use.
 | `nova/cc/parser.py` | Recursive-descent parser with C declarator precedence | Implemented/hardened |
 | `nova/cc/sema.py` | Scopes, symbols, type checking, AST annotations | Implemented (Milestone 4) |
 | `nova/cc/codegen.py` | Nova64 assembly emission, frames, calls, ABI | Implemented (Milestone 5) |
-| `nova/cc/driver.py` | End-to-end compile pipeline and file handling | Pending (Milestone 6) |
-| `nova/cc/__main__.py` | `python -m nova.cc` | Pending (Milestone 6) |
+| `nova/cc/driver.py` | End-to-end compile pipeline and file handling | Implemented (Milestone 6) |
+| `nova/cc/__main__.py` | `python -m nova.cc` | Implemented (Milestone 6) |
 
-`nova/cli.py` gains `compile_main`, exposed as the `nova-cc` console script, in
-Milestone 6.
+`nova/cli.py` exposes `compile_main` as the `nova-cc` console script.
 
 ## 3. Supported C subset (frontend status)
 
@@ -121,10 +122,12 @@ K&R old-style definitions are intentionally not a target.
 
 ## 4. Nova64 code-generation contract (Milestone 5)
 
-`nova.cc.generate(tree, target="nova64")` lowers a semantically analysed
-`TranslationUnit` directly to Nova64 assembly. It refuses a tree without
-`semantic_ok`/`type_context` and any target other than `nova64`. There is no
-separate typed IR, no optimizer, and no register allocator.
+`nova.cc.generate(tree, target="nova64", long_calls=False,
+long_branches=False)` lowers a semantically analysed `TranslationUnit` directly
+to Nova64 assembly. It refuses a tree without `semantic_ok`/`type_context` and
+any target other than `nova64`. There is no separate typed IR, no optimizer, and
+no register allocator. The `nova-cc` driver calls this function; the two long
+options are described below and in `docs/NOVA_CC.md`.
 
 ### Lowering model
 
@@ -159,6 +162,13 @@ separate typed IR, no optimizer, and no register allocator.
   register, never a label).
 - Memory operands whose displacement does not fit the immediate field are
   materialised with `LI` + `ADD` into a scratch register.
+- `--long-calls` replaces each direct call with `LA ra, .Lcgu_longcall_N`,
+  `BL target`, and the return label. `--long-branches` replaces unconditional
+  jumps with `BL label` and conditional branches with an inverted short branch
+  around `BL label`. `BL` is the assembler's documented ten-instruction
+  `LI r15`/`JMP r15` pseudo with a `PCREL_LONG` relocation; `r15` is not used
+  by the compiler elsewhere. Both options are opt-in and trade code size for
+  range independence. There is no automatic relaxation.
 
 ### Data, sections, and relocations
 
@@ -183,10 +193,33 @@ Only frozen ISA v1.0 instructions are emitted. The set currently used is:
 LDBU LDD LDH LDHU LDW LDWU LI MOV MOVI MUL NEG NOT OR REM RET SAR SARI SHL SHLI
 SHR SHRI STB STD STH STW SUB SUBI UDIV UREM XOR`.
 
-The only assembler pseudos used are `LI` and `LA`. In particular there is no
-new instruction, register, CSR, relocation, ABI convention, or undocumented
-assembler syntax; the long-call `--long-calls` option and automatic branch
-relaxation remain future work (Milestone 6 or later).
+The only assembler pseudos used are `LI`, `LA`, and (only under
+`--long-calls`/`--long-branches`) `BL`. In particular there is no new
+instruction, register, CSR, relocation, ABI convention, or undocumented
+assembler syntax. `BL` expands to existing ISA instructions and a `PCREL_LONG`
+relocation that the linker already supports. Branch relaxation is not
+automatic; a program that needs it must be compiled with the matching flag.
+
+### Long calls and long branches
+
+`PCREL_DISP14` encodes a signed 14-bit displacement, so an unmodified direct
+call or branch is limited to roughly ±8 KiB. The default lowering keeps that
+compact form. When `--long-calls` is selected, direct symbol calls become
+`LA ra, return_label` + `BL target` + `return_label:`. When `--long-branches`
+is selected, `_emit_jump` emits `BL label`, and `_emit_branch` emits an
+inverted short branch to a nearby skip label followed by `BL label`:
+
+```
+BNE t0, t1, .Lcgu_branch_skip_N
+BL .Lcgu_target
+.Lcgu_branch_skip_N:
+```
+
+The inverted branch is itself nearby and cannot overflow. Function `.size`
+accounting includes the ten words expanded from each `BL`. Indirect calls and
+the existing `LA ra` call sequence are unaffected. `nova-cc` reports the
+assembler/linker overflow and suggests the missing flag instead of relaxing
+silently.
 
 ### Supported lowering
 
@@ -213,15 +246,18 @@ relaxation remain future work (Milestone 6 or later).
   the semantic model represents FP types, but lowering rejects them.
 - Bit-field access and bit-field initialisers: semantic analysis accepts the
   provisional layout, but the backend rejects member access and initialisation.
-- Variable-length arrays and any object without a static size (`void` objects,
-  incomplete types, flexible array members used as objects).
+- Variable-length arrays: the semantic pass rejects a non-constant array bound
+  with an explicit diagnostic. Objects without a static size (`void` objects,
+  incomplete types, flexible array members used as objects) are likewise
+  rejected.
 - K&R old-style function definitions.
 - Non-constant global initialisers and pointer initialisers that are not a
   symbol address or string literal.
 - `va_start`/`va_arg` and full variadic ABI support; variadic declarations can
   be parsed, but reading unnamed arguments is not implemented.
-- PIC/GOT addressing, long-call emission, automatic branch relaxation, and any
-  optimizer/scheduler/register allocator.
+- PIC/GOT addressing, automatic branch relaxation, and any
+  optimizer/scheduler/register allocator. Long calls and long branches are
+  available only as the explicit `--long-calls`/`--long-branches` options.
 
 ## 5. Runtime and library boundary
 
@@ -247,13 +283,13 @@ stages and subtasks do not count as additional milestones.
 | 3 | **Parser and AST** — recursive-descent parser, syntax-level AST, declarations/declarators/expressions/statements, diagnostics | Parser tests pass | **Complete** (`1d85cdd`, hardened in this milestone) |
 | 4 | **Type system and semantic analysis** — type representation, scopes, name resolution, type checking, expression/statement semantics, annotations | Sema tests pass | **Complete** (this milestone) |
 | 5 | **Nova64 code generation** — lower validated AST/IR into Nova assembly; frames, calls, control flow, supported data types; codegen tests | Generated assembly assembles and a C program runs under `nova-run` | **Complete** (this milestone) |
-| 6 | **Compiler driver and toolchain integration** — `nova-cc` CLI, preprocessing/parsing/sema/codegen/assembler/linker pipeline, compilation modes, end-to-end tests | End-to-end CLI tests pass | Pending |
+| 6 | **Compiler driver and toolchain integration** — `nova-cc` CLI, preprocessing/parsing/sema/codegen/assembler/linker pipeline, compilation modes, end-to-end tests | End-to-end CLI tests pass | **Complete** (`7d8c168`, `260c964`, `c4d4c77`) |
 | 7 | **Runtime, libnova and end-to-end validation** — compiler runtime support, freestanding libnova, representative programs through compile/assemble/link/emulate, documented coverage, repeatable validation suite | Phase 1 validation suite green | Pending |
 
 **Mandatory phase gate:** do not begin Phase 2 until all seven milestones above
 are complete, tested, documented, and committed, and produce a Phase 1
-completion report. Milestone 5 completion does **not** authorize Phase 2 and does
-not start Milestone 6 automatically without explicit direction.
+completion report. Milestone 6 completion does **not** authorize Phase 2 and does
+not start Milestone 7 automatically without explicit direction.
 
 ### Milestone 2 implementation notes (preprocessor)
 
@@ -366,25 +402,85 @@ not start Milestone 6 automatically without explicit direction.
   definitions, `va_start`/`va_arg`, PIC/GOT, long-call selection, automatic
   branch relaxation, and the `nova-cc` driver/CLI.
 
+### Milestone 6 implementation notes (compiler driver and toolchain integration)
+
+- **Entry points:** `nova.cc.driver.main`, `python -m nova.cc`, and the
+  `nova-cc` console script (`nova.cli:compile_main`). User documentation is in
+  `docs/NOVA_CC.md`.
+- **Architecture:** the driver is orchestration only. It calls the existing
+  `preprocess`/`preprocess_to_tokens`, `parse`, `analyze`, `generate`,
+  `assemble_object`, `load_object`/`encode_object`, `link_objects`, and
+  `encode_nob` APIs. No compiler, assembler, linker, or format logic is
+  duplicated.
+- **Modes:** `-E` stops after preprocessing (`.i`), `-S` after assembly
+  (`.s`), `-c` after object encoding (`.nobj`), and the default mode links to
+  `a.nob` (or the `-o` path). `-o` with multiple inputs is accepted only in
+  link mode; `-e`/`--entry` is rejected outside link mode.
+- **Options:** `-I`, ordered `-D`/`-U`, `-std=` (`nova-c11`, `c11`, `gnu11`,
+  `c99`, `gnu99`, `c89`, `c90`), `-O0` only, `--target=nova64` only,
+  `--long-calls`, `--long-branches`, `--version`, and `--help`. Unknown or
+  unsupported options, targets, and optimization levels are rejected before any
+  input is read.
+- **Pipeline and files:** sources are read as UTF-8 (BOM tolerated), compiled
+  through the real stages, and written only after the requested stage succeeds.
+  Writes use a same-directory temporary file followed by `os.replace`. In
+  multi-input non-link mode every input is compiled before any output is
+  written. The driver refuses to overwrite an input, diagnoses missing inputs
+  and output directories, and reports output-path collisions.
+- **Linking and multi-TU builds:** link mode accepts C sources and `.nobj`
+  inputs in any mixture. Static functions and objects carry internal linkage;
+  the frontend fix records `static` on function definitions, so identically
+  named statics in different translation units receive object-local symbols.
+  External duplicate definitions and undefined symbols are reported by the
+  existing linker. `.nobj` and `.nob` formats are unchanged.
+- **Long calls/branches:** `--long-calls` emits `LA ra, .Lcgu_longcall_N` +
+  `BL target` + return label. `--long-branches` emits `BL label` for
+  unconditional jumps and an inverted short branch plus `BL label` for
+  conditionals. `BL` is the assembler's existing ten-word `LI r15`/`JMP r15`
+  pseudo with `PCREL_LONG`; no new instruction or relocation is introduced.
+  Both are opt-in; without them an out-of-range displacement is an
+  assembler/linker error with an actionable flag hint. There is no automatic
+  relaxation.
+- **Frontend hardening:** `-U` removes builtins and `-D` definitions in
+  command-line order; VLAs are rejected explicitly; `sizeof` rejects
+  incomplete struct/union/array, `void`, and function types while accepting
+  pointers to incomplete types and completion before use; static function
+  linkage conflicts are diagnosed.
+- **Diagnostics:** filename/line/column where the stage supplies them, a stage
+  label (`preprocessing`, `parsing`, `semantic analysis`, `code generation`,
+  `assembly`, `link`), exit code `1` for user errors, `2` for usage errors,
+  `70` for internal errors, and `130` for interruption. Ordinary user errors do
+  not print a traceback.
+- **Tests:** `tests/test_cc_driver.py` has 55 tests: 12 CLI surface, 10 output
+  behaviour, 9 preprocessing, 5 assembly, 5 unsupported-construct diagnostics,
+  9 object/link, and 5 emulator execution. `tests/test_cli.py` has 28 tests.
+  Frontend counts: lexer/preprocessor 107, parser 69, sema 85, codegen 57.
+  Full suite 2210 passed; `compileall` clean; conformance 18/18.
+- **Not implemented:** runtime helpers, `libnova`, crt0/start files, hosted C,
+  full variadic argument access, PIC/GOT, automatic relaxation, and any
+  optimizer/register allocator. Those remain Milestone 7 or later.
+
 ## 7. Known limitations (documented honestly)
 
-- No `nova-cc` driver/CLI, runtime, or libnova yet; calling `generate` directly
-  is the only supported way to obtain assembly (Milestones 6–7).
+- `nova-cc` is implemented for the freestanding C subset, but there is no
+  runtime library, `libnova`, or hosted C environment yet (Milestone 7).
 - No floating-point lowering; floating constants are rejected by the lexer and
   FP objects/operations are rejected with source-located diagnostics.
 - Bit-field layout is provisional where `docs/NOVA_C_ABI.md` does not specify a
   rule, and the backend rejects bit-field access and initialisation.
-- VLAs, flexible-array-member objects, and other objects without a static size
-  are not lowerable. `sizeof` of an incomplete type is not yet diagnosed.
+- VLAs are rejected explicitly. Flexible-array-member objects and other objects
+  without a static size are not lowerable. `sizeof` of an incomplete type is
+  diagnosed.
 - No `va_start`/`va_arg` or complete variadic ABI support. Variadic declarations
-  parse, but named-argument access is not implemented.
+  parse, but reading unnamed arguments is not implemented.
 - Some implicit-conversion checks are deliberately conservative; diagnostics
   target the supported subset rather than full ISO C conformance.
 - Not a complete ISO C preprocessor: `#embed`, trigraphs, digraphs, and some
   obscure standard corner cases are intentionally omitted. GNU
   `, ## __VA_ARGS__` remains an extension.
-- No PIC/GOT code generation, long-call selection, automatic branch relaxation,
-  optimizer, scheduler, or register allocator; those belong to later milestones.
+- No PIC/GOT code generation, optimizer, scheduler, or register allocator.
+  Long calls and long branches are explicit opt-in flags; relaxation is not
+  automatic.
 - K&R old-style function definitions are intentionally unsupported.
 
 ## 8. Definition of done (all seven milestones)

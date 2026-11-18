@@ -30,9 +30,9 @@ This document is an audit, not a promise of work.
 | Relocation kinds | `PCREL_DISP14`, `LA64`, `ABS64`, `PCREL_LONG` in `nova/object.py` |
 | Containers and tools | `.nob` v1, `.nobj` v2 (v1 readable), `.nox` v1, `nova-as`/`nova-ld`/`nova-objdump`/`nova-run` |
 | C ABI and runtime contracts | `docs/NOVA_C_ABI.md`, `docs/COMPILER_RUNTIME.md`, `nova/cabi.py` |
-| C compiler frontend and backend (Phase 1 milestones 1–5 complete) | `nova/cc/` lexer, hardened preprocessor, parser/AST, LP64 type system and semantic analyzer (`types.py`, `sema.py`), and direct Nova64 lowering (`codegen.py`) with tests (`tests/test_cc_lexer.py`, `tests/test_cc_preprocessor.py`, `tests/test_cc_parser.py`, `tests/test_cc_sema.py`, `tests/test_cc_codegen.py`); `nova.cc.generate` emits assembly that assembles, links, and executes |
-| C compiler toolchain/runtime (Phase 1 milestones 6–7 pending) | `nova-cc` driver/CLI, compiler runtime, and freestanding `libnova` are not implemented; compilation currently requires calling the Python API directly |
-| Verification | Full pytest suite (2147 passed; codegen 55, lexer/preprocessor 105, parser 69, sema 81), 18/18 conformance vectors, `compileall` clean |
+| C compiler frontend and backend (Phase 1 milestones 1–6 complete) | `nova/cc/` lexer, hardened preprocessor, parser/AST, LP64 type system and semantic analyzer (`types.py`, `sema.py`), direct Nova64 lowering (`codegen.py`), and the `nova-cc` driver (`driver.py`, `__main__.py`, `nova.cli:compile_main`) with tests (`tests/test_cc_lexer.py`, `tests/test_cc_preprocessor.py`, `tests/test_cc_parser.py`, `tests/test_cc_sema.py`, `tests/test_cc_codegen.py`, `tests/test_cc_driver.py`, `tests/test_cli.py`); `nova-cc` emits `.i`/`.s`/`.nobj`/`.nob` and supports multi-translation-unit links |
+| C compiler toolchain/runtime (Phase 1 milestone 7 pending) | Compiler runtime helpers, freestanding `libnova`, and start files are not implemented; the driver, assembler, and linker pipeline is implemented |
+| Verification | Full pytest suite (2210 passed; driver/CLI 55 + 28, codegen 57, lexer/preprocessor 107, parser 69, sema 85), 18/18 conformance vectors, `compileall` clean |
 
 ## 2. Readiness matrix
 
@@ -83,30 +83,38 @@ Remaining blockers for a full GCC/LLVM-class compiler:
 7. **Linker features** still lack weak symbols, linker scripts, dead-code
    elimination, PIE, and shared libraries.
 
-### Phase 1 status (milestones 1–5 complete)
+### Phase 1 status (milestones 1–6 complete)
 
-The C frontend and the Nova64 lowering pass now form a working compiler core:
-preprocessing, tokens, syntax-level AST, the Nova64 LP64 type/semantic passes,
-and direct AST-to-assembly code generation all have regression tests. Public
-entry points include `nova.cc.parse_source(...)`, `nova.cc.analyze(tree,
-target="nova64")`, and `nova.cc.generate(tree, target="nova64")`. Supported
-semantic checks include scope/name resolution, typedef aliases, aggregate/enum
-handling, declarator type construction, expression/conversion checking,
-initializer validation, and local control-flow checks.
+The C frontend, the Nova64 lowering pass, and the `nova-cc` driver now form a
+working freestanding compiler toolchain: preprocessing, tokens, syntax-level
+AST, the Nova64 LP64 type/semantic passes, direct AST-to-assembly code
+generation, assembly, object encoding, and linking all have regression tests.
+Public entry points include `nova.cc.parse_source(...)`, `nova.cc.analyze(tree,
+target="nova64")`, `nova.cc.generate(tree, target="nova64")`, and the
+`nova-cc` / `python -m nova.cc` command line. Supported semantic checks include
+scope/name resolution, typedef aliases, aggregate/enum handling, declarator type
+construction, expression/conversion checking, initializer validation, and local
+control-flow checks.
 
 Generated assembly uses a fixed stack-slot frame model and the documented C ABI
 (`docs/NOVA_C_ABI.md`): a 128-byte outgoing argument area, saved `ra` at
 `sp + 128`, 16-byte-aligned frames, up to six register arguments, stack
 arguments beyond six, indirect calls through `t0`, and small or hidden-pointer
 aggregate returns. It emits only frozen ISA v1.0 instructions, the `LI`/`LA`
-pseudos, and documented directives/relocations. Every covered program is
+pseudos (plus the documented `BL` pseudo under the opt-in long-call/long-branch
+flags), and documented directives/relocations. Every covered program is
 assembled with `assemble_object`, linked with `link_objects`, and executed in
 `NovaMachine`.
 
+The driver supports `-E`, `-S`, `-c`, and link modes; `-o`, `-I`, `-D`, `-U`,
+`-std=`, `-O0`, `--target=nova64`, `--long-calls`, `--long-branches`,
+`-e`/`--entry`, `--version`, and `--help`; multiple C inputs; `.nobj` inputs;
+and multi-translation-unit links. It writes outputs atomically and reports
+stage-located diagnostics. See `docs/NOVA_CC.md`.
+
 Floating types exist only in the semantic model; floating-point lowering,
-bit-field access, VLAs, `va_start`/`va_arg`, PIC/GOT, and long-call selection
-are rejected or remain unimplemented. Milestones 6 (compiler driver and
-toolchain integration) and 7 (runtime, libnova and end-to-end validation) are
+bit-field access, VLAs, `va_start`/`va_arg`, and PIC/GOT are rejected or remain
+unimplemented. Milestone 7 (runtime, libnova and end-to-end validation) is
 pending. Phase 2 remains blocked until all seven Phase 1 milestones are complete,
 tested, documented, and committed, and a Phase 1 completion report is produced.
 
@@ -143,7 +151,7 @@ gone.
 | Phase | Deliverable | Gate to proceed |
 | --- | --- | --- |
 | 0. Toolchain hardening | Done: symbol metadata, `.nox`, directives, includes/macros, C ABI/runtime docs, explicit long branches. Remaining: automatic relaxation, GOT/PIC, weak symbols | A generated C test object links and runs (remaining items still block full GCC/LLVM-class targets) |
-| 1. Compiler + libc | Freestanding C-subset compiler emitting Nova assembly, plus a minimal `libnova` (start files, syscall wrappers, printf/mem/string). **Phase 1 milestone status:** 1 foundation, 2 preprocessor, 3 parser/AST, 4 type system/semantic analysis, and 5 Nova64 code generation are complete; 6 driver/toolchain and 7 runtime/libnova/end-to-end validation are pending. See `docs/PHASE1_PLAN.md` | Compile and run a nontrivial C program on `nova-run` (codegen core proven through the Python API; driver pending) |
+| 1. Compiler + libc | Freestanding C-subset compiler emitting Nova assembly, plus a minimal `libnova` (start files, syscall wrappers, printf/mem/string). **Phase 1 milestone status:** 1 foundation, 2 preprocessor, 3 parser/AST, 4 type system/semantic analysis, 5 Nova64 code generation, and 6 driver/toolchain integration are complete; 7 runtime/libnova/end-to-end validation is pending. See `docs/PHASE1_PLAN.md` and `docs/NOVA_CC.md` | Compile and run a nontrivial C program with `nova-cc` (driver and multi-TU linking proven; runtime/libnova pending) |
 | 2. Nova64 kernel | Boot protocol in the emulator, machine-mode trap shim, supervisor kernel, MMU userspace, scheduler, minimal device ABI, userland libc | Run a userspace process through syscall/MMU path |
 | 3. OpenWindows Nova64 slice | Nova HAL, syscall bridge, OWX loader port, using Phases 1-2 | One OpenWindows subsystem boots and runs |
 | 4. OpenWindows arm64 | Independent AArch64 HAL, UEFI boot, toolchain | Separate project; not derived from Nova |
@@ -151,8 +159,9 @@ gone.
 
 ## 7. Verdict
 
-**Ready to design against, and now able to compile a freestanding C subset
-through the Python API; not yet ready for a driver or a kernel boot.** The
-highest-value next work is finishing Phase 1 (driver, runtime, libnova), not a
-direct kernel port: a kernel needs a compiler toolchain and a boot contract.
+**Ready to design against, and now able to compile a freestanding C subset with
+the `nova-cc` driver; not yet ready for a kernel boot or hosted C.** The
+highest-value next work is finishing Phase 1 Milestone 7 (compiler runtime,
+`libnova`, start files, representative validation), not a direct kernel port: a
+kernel needs a compiler toolchain with a runtime and a boot contract.
 OpenWindows arm64 and hardware are explicitly later, separate efforts.
