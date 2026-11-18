@@ -88,6 +88,7 @@ RESOLVED_PCREL_RANGE = (-(1 << 13), (1 << 13) - 1)
 
 _PCREL_KIND = "PCREL_DISP14"
 _LA64_KIND = "LA64"
+_ABS64_KIND = "ABS64"
 
 
 class LinkError(ValueError):
@@ -252,12 +253,34 @@ def link_objects(objects: Iterable[ObjectFile], *,
             write_word(site + offset * INSTRUCTION_BYTES,
                        assemble_statement(line, 0, 0, {}))
 
+    def write_abs64(site: int, symbol: Symbol, value: int) -> None:
+        """Write an absolute 64-bit address into a ``.quad`` data word."""
+        if not 0 <= value <= WORD_MASK:
+            raise LinkError(
+                f"relocation of '{symbol.name}' at 0x{site:x} overflows the "
+                f"64-bit address space: address 0x{value:x}"
+            )
+        if site % 8:
+            raise LinkError(
+                f"relocation of '{symbol.name}' at 0x{site:x} targets address "
+                f"0x{value:x}, which is not 8-byte aligned"
+            )
+        offset = site - image_base
+        if offset < 0 or offset + 8 > len(result):
+            raise LinkError(
+                f"relocation of '{symbol.name}' at 0x{site:x} is outside the "
+                "linked image"
+            )
+        result[offset:offset + 8] = value.to_bytes(8, "little")
+
     for obj_index, obj in enumerate(inputs):
         for relocation in obj.relocations:
             if relocation.kind == _PCREL_KIND:
                 apply = patch_pcrel
             elif relocation.kind == _LA64_KIND:
                 apply = rewrite_la64
+            elif relocation.kind == _ABS64_KIND:
+                apply = write_abs64
             else:
                 raise LinkError(
                     f"unsupported relocation kind {relocation.kind!r}"

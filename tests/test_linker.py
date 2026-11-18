@@ -326,6 +326,43 @@ def test_la64_relocation_must_start_at_a_movi():
         link_objects([obj, holder])
 
 
+def test_abs64_relocation_resolves_a_quad_to_an_absolute_address():
+    holder = assemble_object("""
+.global _start
+_start:
+    LA r2, ptr
+    LDD r1, [r2]
+    HALT
+.section .data
+.align 8
+ptr: .quad target
+""")
+    target = assemble_object(".global target\ntarget:\n  NOP\n")
+    image = link_objects([holder, target])
+    machine = run_linked(image)
+    assert machine.halted
+    # .text holds the 9-word LA block plus LDD and HALT, then the callee's NOP.
+    assert machine.regs[1] == IMAGE_BASE + (MAX_LI_LENGTH + 2) * INSTRUCTION_BYTES
+
+
+def test_abs64_relocation_requires_an_8_byte_aligned_site():
+    base = assemble_object("""
+.global _start
+_start:
+  NOP
+.section .data
+.align 8
+ptr: .quad target
+.space 8
+.global target
+""")
+    obj = replace(base, relocations=(Relocation(
+        section=1, offset=4, kind="ABS64", symbol=1, addend=0),))
+    holder = assemble_object(".global target\ntarget:\n  NOP\n")
+    with pytest.raises(LinkError, match="not 8-byte aligned"):
+        link_objects([obj, holder])
+
+
 def test_unsupported_relocation_kind_is_reported():
     base = assemble_object(".global _start\n_start:\n  NOP\n")
     obj = replace(base, relocations=(Relocation(
