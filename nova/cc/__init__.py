@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from .diagnostics import CompileError, Diagnostic, SourceLocation
 from .lexer import KEYWORDS, Token, TokenKind, lex
+from .parser import Parser, parse, parse_source
 from .preprocessor import Preprocessor, preprocess, preprocess_to_tokens, tokens_to_text
 
 __all__ = [
@@ -19,6 +20,9 @@ __all__ = [
     "Token",
     "TokenKind",
     "lex",
+    "Parser",
+    "parse",
+    "parse_source",
     "Preprocessor",
     "preprocess",
     "preprocess_to_tokens",

@@ -30,7 +30,8 @@ This document is an audit, not a promise of work.
 | Relocation kinds | `PCREL_DISP14`, `LA64`, `ABS64`, `PCREL_LONG` in `nova/object.py` |
 | Containers and tools | `.nob` v1, `.nobj` v2 (v1 readable), `.nox` v1, `nova-as`/`nova-ld`/`nova-objdump`/`nova-run` |
 | C ABI and runtime contracts | `docs/NOVA_C_ABI.md`, `docs/COMPILER_RUNTIME.md`, `nova/cabi.py` |
-| Verification | 1,837 tests, 18/18 conformance vectors, `compileall` |
+| C compiler frontend (Phase 1, in progress) | `nova/cc/` lexer, hardened preprocessor, parser/AST, and frontend tests (`tests/test_cc_lexer.py`, `tests/test_cc_preprocessor.py`, `tests/test_cc_parser.py`); semantic analysis, code generation, libnova, and `nova-cc` CLI remain pending |
+| Verification | Full pytest suite, 18/18 conformance vectors, `compileall` (see latest verification in commit/test logs) |
 
 ## 2. Readiness matrix
 
@@ -114,7 +115,7 @@ gone.
 | Phase | Deliverable | Gate to proceed |
 | --- | --- | --- |
 | 0. Toolchain hardening | Done: symbol metadata, `.nox`, directives, includes/macros, C ABI/runtime docs, explicit long branches. Remaining: automatic relaxation, GOT/PIC, weak symbols | A generated C test object links and runs (remaining items still block full GCC/LLVM-class targets) |
-| 1. Compiler + libc | Freestanding C-subset compiler emitting Nova assembly, plus a minimal `libnova` (start files, syscall wrappers, printf/mem/string) | Compile and run a nontrivial C program on `nova-run` |
+| 1. Compiler + libc | Freestanding C-subset compiler emitting Nova assembly, plus a minimal `libnova` (start files, syscall wrappers, printf/mem/string). Frontend progress: lexer, hardened preprocessor, and parser/AST are implemented; type checking/semantic analysis, codegen, runtime/libc, and CLI are still required | Compile and run a nontrivial C program on `nova-run` |
 | 2. Nova64 kernel | Boot protocol in the emulator, machine-mode trap shim, supervisor kernel, MMU userspace, scheduler, minimal device ABI, userland libc | Run a userspace process through syscall/MMU path |
 | 3. OpenWindows Nova64 slice | Nova HAL, syscall bridge, OWX loader port, using Phases 1-2 | One OpenWindows subsystem boots and runs |
 | 4. OpenWindows arm64 | Independent AArch64 HAL, UEFI boot, toolchain | Separate project; not derived from Nova |

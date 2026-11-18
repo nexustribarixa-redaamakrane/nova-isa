@@ -6,8 +6,9 @@ the compiler is built. It is kept in sync with `docs/PORTING_READINESS.md`.
 
 The ISA remains frozen at `Nova ISA v1.0`. Phase 1 adds software only.
 
-**Current progress:** Steps 1 and 2 are complete (lexer/diagnostics and
-preprocessor with tests). Next milestone: Step 3 — AST and parser.
+**Current progress:** Steps 1–3 are complete (lexer/diagnostics, hardened
+preprocessor, and parser/AST with tests). Next milestone: Step 4 — type system
+and semantic analysis.
 
 ## 1. Pipeline
 
@@ -143,8 +144,8 @@ operating-system interface is the existing standard syscall table.
 | Step | Deliverable | Gate | Status |
 | --- | --- | --- | --- |
 | 1 | Architecture plan, package skeleton, lexer, diagnostics | Lexer tests pass | **Complete** (`d559f99`, `e439de2`) |
-| 2 | Preprocessor (includes, object/function macros, conditionals) | Preprocessor tests pass | **Complete** (this milestone) |
-| 3 | AST + parser | Parser tests pass | Pending |
+| 2 | Preprocessor hardening (macros, directives, diagnostics, modes) | Preprocessor tests pass | **Complete** (this milestone) |
+| 3 | AST + recursive-descent parser | Parser tests pass | **Complete** (this milestone) |
 | 4 | Type system + semantic analysis | Sema tests pass | Pending |
 | 5 | Codegen: arithmetic, locals, return, first end-to-end program | `nova-run` executes a C program | Pending |
 | 6 | Calls, recursion, globals, ABI tests | Recursive fib runs | Pending |
@@ -160,38 +161,102 @@ Each step is committed separately after its tests pass.
 
 - **Pipeline/API:** `nova.cc.preprocessor` provides `Preprocessor`, `preprocess(...)`
   (text output for future `nova-cc -E`) and `preprocess_to_tokens(...)` (token
-  stream for the parser). Public exports are available from `nova.cc`.
-- **Line processing:** backslash-newline splicing, logical-line directive handling,
-  comment handling via lexer tokenization, and source locations preserved at logical
-  line granularity (expanded tokens are attributed to invocation/active locations).
-- **Macros:** object-like and function-like macros, parameter parsing with nested
-  parentheses, argument substitution, `#undef`, identical redefinition accepted and
-  incompatible redefinition diagnosed, recursive expansion prevention, expansion
-  depth limits.
-- **Operators:** stringification (`#`) and token pasting (`##`) implemented; token
-  pasting requires the result to lex as a single preprocessing token. Basic
-  variadic macros are supported (`...`, `__VA_ARGS__`) including empty variadic
-  arguments in common forms.
-- **Conditionals:** `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif`,
-  `defined`/`defined(...)`, integer constant expression evaluation with arithmetic,
-  bitwise, comparison, logical, and conditional operators; undefined identifiers
-  evaluate to `0` in `#if`. Expression evaluation is implemented by a dedicated
-  parser/evaluator (no Python `eval()`).
-- **Includes:** quoted and angle-bracket includes, deterministic local/include-path
-  search (`include_paths`/`-I`-compatible internal configuration and optional
-  system include paths), nested includes, include-cycle detection, max include
-  depth, missing-file diagnostics, and `#pragma once`. Include names containing
-  `..` are rejected to avoid uncontrolled traversal.
-- **Built-ins/directives:** `__FILE__` and `__LINE__` expand dynamically. `__STDC__`
-  and `__STDC_VERSION__` are intentionally not defined yet (no language-mode claim).
-  `#line` is accepted as a no-op; `#error` is honored in active branches; unknown
-  pragmas (other than `once`) are ignored in inactive/active non-essential contexts
-  as appropriate for this phase.
-- **Limitations:** stringification spacing is an approximation because the lexer does
-  not preserve original whitespace tokens; full macro-prescan/blue-paint edge cases
-  and all standard preprocessing corner cases are not claimed; computed includes are
-  supported after macro expansion for string and `<...>` forms but broader forms may
-  be limited. These are documented constraints pending parser/front-end integration.
+  stream for the parser). The API remains stable and accepts language/include
+  configuration (`language`, `include_paths`, `system_include_paths`, `defines`,
+  `directory`). Public exports are available from `nova.cc`.
+- **Line processing and source locations:** backslash-newline splicing, logical-line
+  directive handling, and comment stripping are implemented. Tokens carry logical
+  file/line information; `#line` remapping updates the logical file/line used for
+  subsequent tokens and for `__FILE__`/`__LINE__` expansion (physical source identity
+  is still used for include processing where appropriate).
+- **Macro expansion:** object-like and function-like macros use hide-set (blue-paint)
+  expansion with rescanning that reinserts replacement tokens ahead of remaining
+  input. This supports argument prescan in invocation context, direct and indirect
+  recursion suppression, nested function-like macro invocations, and function-like
+  invocations formed across expansion boundaries. Macro redefinition is diagnosed
+  unless identical; expansion depth/termination guards prevent infinite recursion.
+- **`#` / `##` / variadics:** stringification uses argument token spellings with
+  whitespace normalization based on lexer `leading_space` information and escaping
+  required for embedding quoted/backslash characters in string literals. `##` is
+  applied in substituted replacement sequences before rescanning, supports
+  consecutive pastes, handles empty operands via placemarkers in common cases, and
+  diagnoses invalid pasted tokens. Variadic macros (`...`, `__VA_ARGS__`) support
+  empty and nested-parenthesized arguments. GNU-style `, ## __VA_ARGS__` comma
+  elision is supported as an optional extension and is not claimed as ISO C behavior.
+- **Conditionals and directives:** `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`,
+  `#endif`, `defined`/`defined(...)`, `#include`, `#define`, `#undef`, `#pragma once`,
+  `#error`, and `#line` are implemented. Conditional expressions are evaluated by a
+  dedicated integer-constant-expression parser (no Python `eval()`), with macro
+  expansion and undefined identifiers treated as `0`. Unknown pragmas are ignored.
+  Unterminated conditionals, malformed directives, argument-count mismatches, and
+  invalid macro operations produce diagnostics.
+- **Includes:** quoted and angle-bracket header names are supported, including
+  computed includes after macro expansion for string-literal and `<...>` forms.
+  Resolution is deterministic (including file directory for quoted includes, then
+  configured include paths/system include paths), with include-cycle detection, max
+  include depth, missing-file diagnostics, `#pragma once`, and rejection of
+  absolute and `..`-containing include names as a safety restriction.
+- **Language modes and built-ins:** `__FILE__` and `__LINE__` expand dynamically.
+  The default documented mode is `nova-c11` (freestanding-oriented): `__STDC__=1`
+  and `__STDC_HOSTED__=0` are predefined. `__STDC_VERSION__` is defined only for
+  explicit standard-level modes (`c11` => `201112L`, `c99` => `199901L`); custom
+  modes may omit these macros. No hosted-library or full ISO C conformance is claimed.
+- **Remaining preprocessor limitations:** not a complete ISO C preprocessor. Original
+  whitespace/newline layout is not fully preserved in `-E`-style text rendering,
+  logical/physical location mapping is line-oriented (not fully precise for all
+  splice/expansion column cases), computed include reconstruction for unusual token
+  sequences may be limited, `_Pragma`, `#embed`, digraph/trigraph preprocessing
+  features, and some obscure standard corner cases are not implemented. GNU
+  `, ## __VA_ARGS__` is an extension. Tests: `tests/test_cc_lexer.py` and
+  `tests/test_cc_preprocessor.py` cover lexing, macro expansion/prescan/recursion,
+  `#`/`##`/variadics, conditionals, includes/guards, `#line`, built-ins/modes, and
+  directive diagnostics.
+
+### Step 3 implementation notes (parser and AST)
+
+- **Pipeline/API:** `nova/cc/ast.py` defines syntax-level AST nodes with source
+  locations for translation units, declarations/specifiers/qualifiers, declarators
+  (identifiers, pointers, arrays, function declarators, parenthesized and abstract
+  declarators), parameters, initializers, expressions, statements, and function
+  definitions. `nova/cc/parser.py` implements a hand-written recursive-descent parser
+  consuming preprocessed tokens. `nova.cc` exposes `Parser`, `parse(tokens, ...)`,
+  and `parse_source(source, ...)` (C source → preprocessor → parser → AST) while
+  keeping the preprocessor API stable.
+- **Declarations and declarators:** supports declaration specifiers including
+  storage classes, type qualifiers, function specifiers, primitive type sequences,
+  struct/union/enum specifiers, and typedef names. Parses init-declarators, multiple
+  declarators per declaration, initializers (including brace initializer lists), and
+  C declarator structure for pointers, arrays, function declarators, parenthesized
+  declarators, pointer-to-array, arrays of pointers, function pointers, and functions
+  returning pointers. Struct/union members and enum enumerators are parsed; bit-field
+  declarators are parsed when present in the member syntax.
+- **Expressions:** precedence-climbing/recursive-descent expression parsing covers
+  primary expressions, postfix operations (call, subscript, `.`/`->`, postfix
+  `++/--`), unary operators, `sizeof` (expression and type-name forms), casts,
+  multiplicative/additive/shift/relational/equality/bitwise/logical operators,
+  conditional `?:`, assignment operators, and comma expressions with C associativity.
+- **Statements:** parses compound statements, declarations in blocks, expression/null
+  statements, `if`/`else`, `while`, `do`/`while`, `for` (including declaration init
+  where supported by the parser), `switch`/`case`/`default`, `break`, `continue`,
+  `return`, `goto`, and labels.
+- **Diagnostics and recovery:** syntax errors are reported as source-located
+  `CompileError` diagnostics (unexpected tokens, missing delimiters/`;`, malformed
+  declarations/expressions/declarators, unmatched braces, unexpected EOF in tested
+  cases). Basic synchronization is implemented at top-level/block boundaries to avoid
+  infinite loops; the current parser fails fast with a useful diagnostic rather than
+  producing a recovered multi-error parse.
+- **Supported subset (syntax):** sufficient C declaration/declarator/expression/
+  statement forms for early Phase 1 semantic analysis and code generation work,
+  including structs/unions/enums, typedef names, pointers/arrays/functions, and core
+  control flow. Not yet a complete C grammar: abstract declarator/type-name coverage
+  is limited to common cast/sizeof cases, K&R old-style function definitions are not
+  a target, designated initializers/compound literals/generic selections/VLAs/flexible
+  array edge cases and some standard declarator corners may be incomplete, and no
+  semantic/type validation is performed yet.
+- **Tests:** `tests/test_cc_parser.py` covers basic translation-unit/function parsing,
+  required declarator forms, expressions/precedence/associativity, statements/control
+  flow, declarations/specifiers/typedefs/aggregates/enums, preprocessed source
+  parsing, and representative error cases.
 
 ## 7. Known Phase 1 limitations (to be documented honestly)
 
