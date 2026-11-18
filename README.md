@@ -51,7 +51,7 @@ Nova has exactly one execution mode, named `Nova64`. There is no 32-bit compatib
 
 ### 3.1 General-purpose registers
 
-`r0` through `r31` are 64-bit registers. Reads of `r0` return zero and writes to it are discarded. The architectural aliases are `zero = r0`, `sp = r29`, `fp = r30`, and `ra = r31`. The ABI aliases defined in section 15 are `a0`–`a5`, `t0`–`t3`, and `s0`–`s3`.
+`r0` through `r31` are 64-bit registers. Reads of `r0` return zero and writes to it are discarded. The architectural aliases are `zero = r0`, `sp = r29`, `fp = r30`, and `ra = r31`. The ABI aliases defined in section 15 are `a0`–`a5`, `t0`–`t3`, `s0`–`s3`, and the PIC global pointer `gp = r28`.
 
 ### 3.2 Control and status registers
 
@@ -374,7 +374,7 @@ Exception entry performs, in order:
 
 ## 15. Nova ABI v1.0
 
-The ABI is a software convention layered on the ISA, not part of the machine contract.
+The ABI is a software convention layered on the ISA, not part of the machine contract. `docs/NOVA_C_ABI.md` is the full C ABI specification (data model, aggregates, struct returns, varargs, PIC, soft float), `docs/COMPILER_RUNTIME.md` specifies the libgcc-equivalent helper contracts, and `nova.cabi` publishes the ABI's machine-readable constants.
 
 - **Arguments and returns.** `a0`–`a5` (registers 1–6) carry the first six integer arguments. `a0` also carries the single integer return value.
 - **Temporaries.** `t0`–`t3` (registers 7–10) are caller-saved scratch registers.

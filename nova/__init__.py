@@ -20,6 +20,7 @@ from .disassembler import (
     disassemble_word,
     disassemble_words,
 )
+from . import cabi
 from .emulator import HANDLERS, NovaCluster, NovaMachine
 from .nox import (
     DebugInfo,
@@ -176,6 +177,7 @@ __all__ = [
     # object identities, syscalls, and conformance
     "objfmt",
     "syscalls",
+    "cabi",
     "nox",
     "DebugInfo",
     "FrameDescription",

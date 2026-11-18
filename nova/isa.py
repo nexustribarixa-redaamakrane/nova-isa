@@ -111,6 +111,7 @@ REGISTERS: Mapping[str, int] = MappingProxyType(
         "a0": 1, "a1": 2, "a2": 3, "a3": 4, "a4": 5, "a5": 6,
         "t0": 7, "t1": 8, "t2": 9, "t3": 10,
         "s0": 11, "s1": 12, "s2": 13, "s3": 14,
+        "gp": 28,
     }
 )
 
@@ -121,6 +122,7 @@ REGISTER_ALIASES: Mapping[str, str] = MappingProxyType(
         "a4": "r5", "a5": "r6",
         "t0": "r7", "t1": "r8", "t2": "r9", "t3": "r10",
         "s0": "r11", "s1": "r12", "s2": "r13", "s3": "r14",
+        "gp": "r28",
     }
 )
 
