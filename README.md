@@ -374,7 +374,24 @@ The ABI is a software convention layered on the ISA, not part of the machine con
 - **Saved registers.** `s0`–`s3` (registers 11–14) are callee-saved; a callee must restore them before returning.
 - **Stack and frame.** `sp` (register 29) points to the next free slot. `fp` (register 30) is an optional frame pointer. The stack grows downward and must be 16-byte aligned at a call boundary. An 8-byte-aligned slot is sufficient for the two-register save area used by exception handlers.
 - **Return address.** `CALL` writes `pc + 4` to `ra` (register 31); `RET` jumps through `ra`. Leaf functions may use `ra` directly.
-- **System calls.** `SCALL imm` invokes system call number `imm`; arguments are in `a0`–`a5` and the return value is in `a0`. The handler reads `ecause` for the call number.
+- **System calls.** `SCALL imm` invokes system call number `imm`; arguments are in `a0`–`a5` and the return value is in `a0`. The handler reads `ecause` for the call number. A failed call returns `-1` in `a0` and an error code in `a1`.
+
+### 15.1 Standard syscall table
+
+`nova.syscalls` publishes "Nova syscall ABI v1.0", the standard call numbers below. They are a software convention layered on the ISA: a kernel may implement them, and `nova.syscalls.dispatch_syscall(machine)` demonstrates them for the reference model.
+
+| Number | Name | Arguments (a0–a5) | Result | Meaning |
+| ---: | --- | --- | --- | --- |
+| `0` | `SYS_EXIT` | `code` | `never returns` | Terminate the calling hart's program with the given exit code. |
+| `1` | `SYS_WRITE` | `fd, buffer, count` | `bytes written` | Write ``count`` bytes from virtual address ``buffer`` to handle ``fd``. Handle assignment is implementation-defined; the reference model records writes in ``machine.io_log``. |
+| `2` | `SYS_READ` | `fd, buffer, count` | `bytes read` | Read up to ``count`` bytes into ``buffer`` from handle ``fd``. |
+| `3` | `SYS_TIME` | `none` | `time` | Return the current value of the ``time`` CSR. |
+| `4` | `SYS_OBJ_CREATE` | `size` | `object reference` | Create an object of ``size`` bytes; equivalent to OBJ.CREATE. |
+| `5` | `SYS_OBJ_SIZE` | `reference` | `size` | Return the size of a live object; equivalent to OBJ.GET. |
+| `6` | `SYS_OBJ_DESTROY` | `reference` | `zero or error` | Destroy a live object; equivalent to OBJ.DROP. |
+| `7` | `SYS_YIELD` | `none` | `zero` | Suggest that the implementation schedule another hart; the reference model halts until an interrupt is injected. |
+
+Error codes in `a1` are `1` bad argument, `2` unsupported, `3` not found, and `4` no resource. The reference model implements the architectural calls (exit, time, object operations, yield) and records `SYS_WRITE` data in `machine.io_log`; `SYS_READ` is deliberately unsupported because input devices are outside the ISA.
 - **Exception handlers.** No GPR is altered on entry; a handler that must preserve a register saves and restores it. The canonical save/restore template uses `sp` and `LDD`/`STD` and always repoints `vbar` before any operation that can fault again.
 
 ## 16. Assembly language and tools
@@ -414,6 +431,7 @@ less: RET
 | `INSTRUCTION_TABLE`, `CSR_TABLE`, `EXCEPTION_CODES` | The authoritative tables |
 | `PROFILE`, `EXECUTION_MODES` | The single 64-bit execution profile |
 | `objfmt` | Deterministic encoder/decoder for external object identities |
+| `syscalls` | Standard syscall table and reference dispatcher |
 | `CONFORMANCE_VECTORS`, `run_conformance_suite()`, `conformance_report()` | Architecture conformance suite |
 | `validate_table()` | Raise if the ISA tables are not internally consistent |
 
@@ -543,7 +561,7 @@ The reference emulator is architectural: it models registers, the program counte
 
 ## 20. Implementation report
 
-**Implemented:** the complete base ISA defined above — 83 instructions across eight formats; the 64-bit-only profile with import-time enforcement; 19 assigned CSRs; the four-level translator with 4 KiB, 2 MiB and 1 GiB pages, permissions, faults, and TLB invalidation; six 64-bit atomics with acquire/release fields; the three-source interrupt architecture with IPIs and a multicore cluster helper; the virtualization extension; the finalized capability/permission object model with stable, versioned cross-process identities and an import/export format; the Nova ABI v1.0 conventions; the assembler, disassembler, pseudo-instructions, relocatable objects, static linker, executable container, and four command-line tools.
+**Implemented:** the complete base ISA defined above — 83 instructions across eight formats; the 64-bit-only profile with import-time enforcement; 19 assigned CSRs; the four-level translator with 4 KiB, 2 MiB and 1 GiB pages, permissions, faults, and TLB invalidation; six 64-bit atomics with acquire/release fields; the three-source interrupt architecture with IPIs and a multicore cluster helper; the virtualization extension; the finalized capability/permission object model with stable, versioned cross-process identities and an import/export format; the Nova ABI v1.0 conventions and standard syscall table; the assembler, disassembler, pseudo-instructions, relocatable objects, static linker, executable container, and four command-line tools.
 
 **Partially implemented:** the MMU TLB is a simple functional cache rather than a hardware-exact structure (the architecture exposes only its flush behavior, which is implemented); the cluster helper models hart identity, shared memory, and IPI routing, not physical interconnects; the memory consistency model is realized by direct sequential execution rather than by a relaxed hardware model with explicit barriers.
 

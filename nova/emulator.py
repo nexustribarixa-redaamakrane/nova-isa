@@ -856,6 +856,7 @@ class NovaMachine:
         self._tlb: Dict[Tuple[int, int, int, int], int] = {}
         self.ipi_log: List[Tuple[int, int]] = []
         self.irq_log: List[int] = []
+        self.io_log: List[Tuple[int, bytes]] = []
         self._host_state: Optional[Tuple[int, int, int]] = None
         self.last_amo_ordering: Tuple[int, int] = (0, 0)
         self.load_code(code, entry)

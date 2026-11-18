@@ -20,7 +20,7 @@ from .disassembler import (
     disassemble_words,
 )
 from .emulator import HANDLERS, NovaCluster, NovaMachine
-from . import objfmt
+from . import objfmt, syscalls
 from .isa import (
     ALIASES,
     CSR_BY_NAME,
@@ -162,8 +162,9 @@ __all__ = [
     "instruction_table_markdown",
     "csr_table_markdown",
     "opcode_table_markdown",
-    # object identities and conformance
+    # object identities, syscalls, and conformance
     "objfmt",
+    "syscalls",
     "CONFORMANCE_VERSION",
     "CONFORMANCE_VECTORS",
     "run_conformance_suite",
