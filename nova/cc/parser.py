@@ -17,7 +17,7 @@ from .lexer import Token, TokenKind
 from .preprocessor import preprocess_to_tokens
 
 ASSIGNMENT_OPS = {"=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "^=", "|="}
-TYPE_QUALIFIERS = {"const", "volatile", "restrict"}
+TYPE_QUALIFIERS = {"const", "volatile", "restrict", "_Atomic"}
 STORAGE_CLASSES = {"typedef", "extern", "static", "auto", "register"}
 FUNCTION_SPECIFIERS = {"inline", "_Noreturn"}
 TYPE_KEYWORDS = {"void", "char", "short", "int", "long", "signed", "unsigned", "_Bool", "float", "double"}

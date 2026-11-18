@@ -538,3 +538,137 @@ def test_analyzer_can_be_used_directly():
     result = analyzer.analyze_translation_unit(tu)
     assert result is tu
     assert "x" in analyzer.file_scope.ordinary
+
+
+# ---------------------------------------------------------------------------
+# Milestone 5 semantic hardening regressions
+# ---------------------------------------------------------------------------
+
+def test_long_long_specifiers_are_not_collapsed():
+    types_found = object_types("long long a; unsigned long long b; long c;")
+    assert [ty.describe() for ty in types_found] == ["long long", "unsigned long long", "long"]
+    assert types_found[0].sizeof() == 8
+    assert t.is_signed_integer(types_found[0], t.TypeContext())
+    assert not t.is_signed_integer(types_found[1], t.TypeContext())
+
+
+def test_sizeof_rejects_invalid_and_incomplete_operands():
+    expect_error("int n = sizeof(void);", "sizeof(void) is invalid")
+    expect_error("int f(void); int n = sizeof(f);", "sizeof(function type) is invalid")
+    expect_error("int n = sizeof(int[]);", "incomplete array type")
+    expect_error("struct S; int n = sizeof(struct S);", "sizeof incomplete type")
+
+
+def test_incomplete_array_is_completed_from_initializer():
+    ty = first_object_type('char s[] = "abc"; int a[] = {1, 2, 3};')
+    assert ty.describe() == "array[3] of int"
+    strings = sema('char s[] = "abc";')
+    decl = strings.declarations[0].init_declarators[0]
+    assert decl.resolved_type.length == 4
+
+
+def test_initializer_metadata_records_positions_and_conversions():
+    tu = sema(
+        """
+        struct S { int a; int b; };
+        int main(void) {
+            struct S s = {.b = 7};
+            int a[2] = {1, 2};
+            return 0;
+        }
+        """
+    )
+    fn = tu.declarations[-1]
+    s_init = fn.body.items[0].init_declarators[0].initializer
+    b_init = s_init.items[0]
+    assert b_init.field_index == 1
+    assert b_init.designated_field == "b"
+    a_init = fn.body.items[1].init_declarators[0].initializer
+    assert [item.array_index for item in a_init.items] == [0, 1]
+    small = first_decl("int main(void) { char c = 300; return 0; }")
+    expr = small.body.items[0].init_declarators[0].initializer
+    assert expr.implicit_cast_to.describe() == "char"
+    assert expr.implicit_cast_kind == "initializer"
+
+
+def test_pointer_assignment_rules_and_diagnostics():
+    tu = sema(
+        """
+        int f(const int *dst, int *src, int n) {
+            dst = src;
+            src = 0;
+            return 0;
+        }
+        """
+    )
+    fn = tu.declarations[0]
+    dst_assign = fn.body.items[0].expression
+    src_assign = fn.body.items[1].expression
+    assert dst_assign.right.value_category == "lvalue"
+    assert dst_assign.right.implicit_cast_to.describe() == "pointer to const int"
+    assert src_assign.right.implicit_cast_to.describe() == "pointer to int"
+    expect_error(
+        "int f(const int *p) { int *q = p; return 0; }",
+        "incompatible initializer type",
+    )
+    expect_error("int *p = 1;", "incompatible initializer type")
+
+
+def test_null_pointer_constant_accepts_integer_zero_expressions():
+    sema("int *p = 1 - 1; int *q = (0);")
+
+
+def test_incompatible_call_argument_is_source_located():
+    err = expect_error(
+        """
+        void f(int *p);
+        int main(void) { f(3); return 0; }
+        """,
+        "incompatible argument 1",
+    )
+    assert err.location.line == 3
+
+
+def test_floating_point_operations_are_rejected_with_source_location():
+    expect_error("double x; int y = x;", "floating-point initializer expressions")
+    expect_error("int f(double x) { return x; }", "floating-point return expressions")
+    expect_error("double x; int main(void) { if (x) return 1; return 0; }", "floating-point condition types")
+
+
+def test_named_zero_width_bitfield_is_rejected():
+    expect_error("struct S { int x : 0; };", "named bit-field cannot have zero width")
+
+
+def test_flexible_array_member_requires_another_named_member():
+    expect_error("struct S { int data[]; };", "more than one named member")
+
+
+def test_enum_values_must_fit_int():
+    expect_error("enum E { A = 2147483648 };", "outside the range")
+
+
+def test_incomplete_parameter_and_return_types_are_rejected():
+    expect_error("struct S; void f(struct S x);", "parameter has incomplete type")
+    expect_error("struct S; struct S f(void);", "incomplete type")
+
+
+def test_atomic_qualifier_is_parsed():
+    ty = first_object_type("_Atomic int x;")
+    assert ty.describe() == "_Atomic int"
+    assert ty.qualifiers.atomic
+
+
+def test_function_symbol_records_parameter_scope():
+    fn = first_decl("int f(int a) { return a; }")
+    params_scope = fn.symbol.params_scope
+    assert params_scope is not None
+    assert params_scope.lookup_ordinary("a") is not None
+
+
+def test_implicit_conversions_annotate_arithmetic_and_returns():
+    fn = first_decl("long f(unsigned int a) { return a + 1L; }")
+    add = fn.body.items[0].value
+    assert add.left.implicit_cast_to.describe() == "long"
+
+    ret = first_decl("int g(long x) { return x; }").body.items[0].value
+    assert ret.implicit_cast_to.describe() == "int"

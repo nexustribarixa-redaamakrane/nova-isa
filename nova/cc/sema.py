@@ -17,6 +17,7 @@ It validates a useful Phase 1 subset and reports source-located diagnostics.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
@@ -131,6 +132,41 @@ class Analyzer:
     def error(self, loc: SourceLocation, msg: str) -> SemanticError:
         return SemanticError.at(loc, msg)
 
+    # -- semantic annotations / backend gate -------------------------------
+
+    def note_conversion(
+        self,
+        expr: Optional[ast.Expression],
+        target: Type,
+        kind: str,
+        source: Optional[Type] = None,
+    ) -> None:
+        """Record an implicit conversion for the lowering pass.
+
+        ``resolved_type`` remains the expression's natural semantic type. The
+        lowering pass consults ``implicit_cast_to`` when materialising the value
+        so it need not redo C's promotion/conversion rules.
+        """
+        if expr is None:
+            return
+        if source is None:
+            source = getattr(expr, "resolved_type", None)
+        target_u = types.strip_qualifiers(target)
+        if source is not None and types.type_eq(types.strip_qualifiers(source), target_u):
+            return
+        expr.implicit_cast_to = target_u  # type: ignore[attr-defined]
+        expr.implicit_cast_kind = kind  # type: ignore[attr-defined]
+
+    def require_lowering_supported(self, t: Type, loc: SourceLocation, what: str) -> None:
+        """Reject types the Nova64 backend cannot lower, with a clear diagnostic."""
+        st = types.strip_qualifiers(t)
+        if isinstance(st, FloatingType):
+            raise self.error(loc, f"floating-point {what} are not supported by the Nova64 backend")
+        if isinstance(st, (ArrayType, FunctionType)):
+            # Arrays/functions are valid only through decay or explicit
+            # sizeof/address contexts; callers handle those before reaching here.
+            return
+
     # -- entry --------------------------------------------------------------
 
     def analyze_translation_unit(self, tu: ast.TranslationUnit) -> ast.TranslationUnit:
@@ -197,41 +233,54 @@ class Analyzer:
         raise self.error(loc, "invalid combination of type specifiers")
 
     def map_primitive_type(self, names: Sequence[str], loc: SourceLocation) -> Type:
+        """Map a C specifier sequence to a Nova64 semantic type.
+
+        A multiset is required: ``long long`` must not collapse to ``long`` just
+        because Python sets remove the duplicate keyword.
+        """
         ctx = self.ctx
-        key = tuple(sorted(names))
-        # normalize common forms
-        s = set(names)
-        if s == {"void"}:
+        counts = Counter(names)
+        s = set(counts)
+        is_signed = "signed" in s
+        is_unsigned = "unsigned" in s
+        if is_signed and is_unsigned:
+            raise self.error(loc, "both 'signed' and 'unsigned' specified")
+        if counts["void"] == 1 and len(names) == 1:
             return ctx.void_t
-        if s == {"_Bool"}:
+        if counts["_Bool"] == 1 and len(names) == 1:
             return ctx.bool_t
-        if s == {"char"}:
-            return ctx.char_t
-        if s == {"signed", "char"}:
-            return ctx.schar_t
-        if s == {"unsigned", "char"}:
-            return ctx.uchar_t
-        if s in ({"short"}, {"signed", "short"}, {"short", "int"}, {"signed", "short", "int"}):
-            return ctx.short_t
-        if s in ({"unsigned", "short"}, {"unsigned", "short", "int"}):
-            return ctx.ushort_t
-        if s in ({"int"}, {"signed"}, {"signed", "int"}):
-            return ctx.int_t
-        if s in ({"unsigned"}, {"unsigned", "int"}):
-            return ctx.uint_t
-        if s in ({"long"}, {"signed", "long"}, {"long", "int"}, {"signed", "long", "int"}):
-            return ctx.long_t
-        if s in ({"unsigned", "long"}, {"unsigned", "long", "int"}):
-            return ctx.ulong_t
-        if s in ({"long", "long"}, {"signed", "long", "long"}, {"long", "long", "int"}, {"signed", "long", "long", "int"}):
-            return ctx.llong_t
-        if s in ({"unsigned", "long", "long"}, {"unsigned", "long", "long", "int"}):
-            return ctx.ullong_t
-        if s == {"float"}:
+        if counts["char"] == 1:
+            if is_signed and not is_unsigned:
+                return ctx.schar_t
+            if is_unsigned:
+                return ctx.uchar_t
+            if not is_signed:
+                return ctx.char_t
+        if counts["short"] == 1 and "long" not in s and "double" not in s:
+            if counts["int"] <= 1 and "char" not in s:
+                if is_unsigned:
+                    return ctx.ushort_t
+                return ctx.short_t
+        if counts["long"] == 2 and "double" not in s and "short" not in s:
+            if counts["int"] <= 1 and "char" not in s:
+                if is_unsigned:
+                    return ctx.ullong_t
+                return ctx.llong_t
+        if counts["long"] == 1 and "double" not in s and "short" not in s:
+            if counts["int"] <= 1 and "char" not in s:
+                if is_unsigned:
+                    return ctx.ulong_t
+                return ctx.long_t
+        if counts["int"] == 1 and not (s & {"char", "short", "long", "double", "float", "void", "_Bool"}):
+            return ctx.uint_t if is_unsigned else ctx.int_t
+        if counts["int"] == 0 and len(names) == 1 and s <= {"signed", "unsigned"}:
+            # Plain `signed` is `signed int`; plain `unsigned` is `unsigned int`.
+            return ctx.uint_t if is_unsigned else ctx.int_t
+        if counts["float"] == 1 and len(names) == 1:
             return ctx.float_t
-        if s == {"double"}:
+        if counts["double"] == 1 and "long" not in s and len(names) == 1:
             return ctx.double_t
-        if s in ({"long", "double"}):
+        if counts["double"] == 1 and counts["long"] == 1 and len(names) == 2:
             return ctx.ldouble_t
         raise self.error(loc, f"unsupported or invalid type specifier combination: {' '.join(names)}")
 
@@ -349,6 +398,8 @@ class Analyzer:
                     unit_align = ftype.alignof() or 4
                     max_align = max(max_align, unit_align)
                     if bit_width == 0:
+                        if fname is not None:
+                            raise self.error(sd.location, "named bit-field cannot have zero width")
                         # unnamed zero-width bit-field forces alignment to next unit boundary (simplified)
                         if current_bit_unit_size:
                             if is_union:
@@ -401,13 +452,17 @@ class Analyzer:
                 if fname:
                     field_map[fname] = finfo
                 rec.fields.append(finfo)
-        # FAM must be last (struct only)
+        # FAM must be last, and a struct containing one needs another named
+        # member (C11 6.7.2.1p18). Anonymous bit-fields do not count.
         if not is_union and rec.fields:
             fam_count = sum(1 for f in rec.fields if isinstance(types.strip_qualifiers(f.type), ArrayType) and types.strip_qualifiers(f.type).length is None)
             if fam_count:
                 last = types.strip_qualifiers(rec.fields[-1].type)
                 if fam_count > 1 or not (isinstance(last, ArrayType) and last.length is None):
                     raise self.error(loc, "flexible array member must be the last member of a struct")
+                named_count = sum(1 for f in rec.fields if f.name is not None and f.bit_width is None)
+                if named_count < 2:
+                    raise self.error(loc, "struct with a flexible array member must have more than one named member")
         if is_union:
             size = _align_up(max_size, max_align)
         else:
@@ -464,8 +519,18 @@ class Analyzer:
                     val = self.eval_integer_constant(e.value, require_constant=True)
                     if val is None:
                         raise self.error(e.location if hasattr(e, 'location') else node.location, "enum constant must be an integer constant expression")
+                    if not (-(1 << 31) <= int(val) <= (1 << 31) - 1):
+                        raise self.error(
+                            e.location if hasattr(e, 'location') else node.location,
+                            "enumerator value is outside the range of the enum's int underlying type",
+                        )
                     next_val = int(val)
                 ev = next_val
+                if not (-(1 << 31) <= ev <= (1 << 31) - 1):
+                    raise self.error(
+                        e.location if hasattr(e, 'location') else node.location,
+                        "enumerator value is outside the range of the enum's int underlying type",
+                    )
                 ec = Symbol(e.name, "enum_const", et, e.location if hasattr(e, 'location') else node.location, enum_value=ev, defined=True)
                 existing = self.scope.lookup_ordinary_local(e.name)
                 if existing is not None:
@@ -563,6 +628,8 @@ class Analyzer:
                 raise self.error(node.location, "function cannot return array type")
             if isinstance(stripped, FunctionType):
                 raise self.error(node.location, "function cannot return function type")
+            if stripped.is_incomplete() and not isinstance(stripped, VoidType):
+                raise self.error(node.location, "function cannot return an incomplete type")
             params, variadic, no_proto = self.analyze_parameter_list(node.params, node.location)
             return FunctionType(base, params, variadic=variadic, no_prototype=no_proto)
         raise AssertionError(f"unknown type constructor {kind}")
@@ -604,6 +671,8 @@ class Analyzer:
                 if len(params_node.params) != 1 or variadic or name is not None:
                     raise self.error(p.location, "'void' must be the only parameter")
                 return [], False, False
+            if types.strip_qualifiers(ptype).is_incomplete():
+                raise self.error(p.location, "parameter has incomplete type")
             params.append(ParameterType(name, ptype))
         return params, variadic, False
 
@@ -645,7 +714,42 @@ class Analyzer:
                 if init_decl.initializer is not None:
                     raise self.error(init_decl.location, "function declaration cannot have an initializer")
             else:
+                if init_decl.initializer is not None:
+                    dtype = self.complete_array_type_from_initializer(dtype, init_decl.initializer, init_decl.location)
+                    init_decl.resolved_type = dtype  # type: ignore[attr-defined]
+                    init_decl.declarator.resolved_type = dtype  # type: ignore[attr-defined]
                 self.declare_object(name, dtype, init_decl.location, storage_names, init_decl.initializer, is_file_scope)
+                init_decl.symbol = self.scope.lookup_ordinary_local(name)  # type: ignore[attr-defined]
+
+    def complete_array_type_from_initializer(self, dtype: Type, initializer, loc: SourceLocation) -> Type:
+        """Give an incomplete array type a length derived from its initializer."""
+        t = types.strip_qualifiers(dtype)
+        if not isinstance(t, ArrayType) or t.length is not None:
+            return dtype
+        length: Optional[int] = None
+        if isinstance(initializer, ast.StringLiteral):
+            length = len(initializer.value.encode("utf-8")) + 1
+        elif isinstance(initializer, ast.InitializerList):
+            next_index = 0
+            max_index = -1
+            for item in initializer.items:
+                index = next_index
+                if isinstance(item, ast.DesignatedInitializer):
+                    for desig in item.designators:
+                        if desig.index is not None:
+                            val = self.eval_integer_constant(desig.index, require_constant=True)
+                            if val is None:
+                                raise self.error(desig.index.location, "array designator must be an integer constant expression")
+                            index = int(val)
+                            break
+                if index < 0:
+                    raise self.error(loc, "array designator index must be non-negative")
+                max_index = max(max_index, index)
+                next_index = index + 1
+            length = max_index + 1 if max_index >= 0 else 0
+        if length is None:
+            return dtype
+        return ArrayType(t.element, length, t.qualifiers)
 
     def declare_object(self, name: str, dtype: Type, loc: SourceLocation, storage_names: Sequence[str], initializer, is_file_scope: bool) -> None:
         if isinstance(types.strip_qualifiers(dtype), VoidType):
@@ -713,6 +817,7 @@ class Analyzer:
         self.current_return_type = ft.return_type
         # function scope for labels/params/body
         fn_scope = self.push_scope("function")
+        sym.params_scope = fn_scope  # type: ignore[attr-defined]
         self.label_defs = {}
         self.label_refs = []
         # parameters
@@ -760,6 +865,7 @@ class Analyzer:
             cond_t = self.analyze_expression(stmt.condition)
             if not types.is_scalar_type(cond_t):
                 raise self.error(stmt.location, "controlling expression of if statement must have scalar type")
+            self.require_lowering_supported(cond_t, stmt.condition.location, "condition types")
             self.analyze_statement(stmt.then_branch)
             if stmt.else_branch:
                 self.analyze_statement(stmt.else_branch)
@@ -768,6 +874,7 @@ class Analyzer:
             cond_t = self.analyze_expression(stmt.condition)
             if not types.is_scalar_type(cond_t):
                 raise self.error(stmt.location, "controlling expression of while statement must have scalar type")
+            self.require_lowering_supported(cond_t, stmt.condition.location, "condition types")
             self.loop_depth += 1
             self.analyze_statement(stmt.body)
             self.loop_depth -= 1
@@ -779,6 +886,7 @@ class Analyzer:
             cond_t = self.analyze_expression(stmt.condition)
             if not types.is_scalar_type(cond_t):
                 raise self.error(stmt.location, "controlling expression of do-while statement must have scalar type")
+            self.require_lowering_supported(cond_t, stmt.condition.location, "condition types")
             return
         if isinstance(stmt, ast.ForStatement):
             self.push_scope("block")
@@ -791,6 +899,7 @@ class Analyzer:
                 ct = self.analyze_expression(stmt.condition)
                 if not types.is_scalar_type(ct):
                     raise self.error(stmt.location, "controlling expression of for statement must have scalar type")
+                self.require_lowering_supported(ct, stmt.condition.location, "condition types")
             if stmt.step is not None:
                 self.analyze_expression(stmt.step)
             self.loop_depth += 1
@@ -810,8 +919,11 @@ class Analyzer:
                 vt = self.analyze_expression(stmt.value)
                 if isinstance(rt, VoidType):
                     raise self.error(stmt.location, "void function should not return a value")
+                self.require_lowering_supported(rt, stmt.value.location, "return types")
+                self.require_lowering_supported(vt, stmt.value.location, "return expressions")
                 if not self.is_assignable(rt, vt, stmt.value, check_const=False):
                     raise self.error(stmt.location, "incompatible return type")
+                self.note_conversion(stmt.value, rt, "return conversion", source=vt)
             return
         if isinstance(stmt, ast.BreakStatement):
             if self.loop_depth <= 0 and self.switch_depth <= 0:
@@ -825,6 +937,7 @@ class Analyzer:
             ct = self.analyze_expression(stmt.condition)
             if not types.is_integer_type(ct):
                 raise self.error(stmt.location, "controlling expression of switch statement must have integer type")
+            self.require_lowering_supported(ct, stmt.condition.location, "switch condition types")
             self.switch_depth += 1
             self.switch_stack.append({"cases": set(), "has_default": False})
             self.analyze_statement(stmt.body)
@@ -878,20 +991,33 @@ class Analyzer:
     # ------------------------------------------------------------------
 
     def analyze_initializer(self, target_type: Type, init: ast.Initializer, loc: SourceLocation) -> None:
+        """Validate an initializer and record placement/conversion metadata."""
         t = types.strip_qualifiers(target_type)
+        init.resolved_type = target_type  # type: ignore[attr-defined]
         if isinstance(init, ast.InitializerList):
             if isinstance(t, ArrayType):
-                # basic validation
-                count = 0
+                next_index = 0
                 for item in init.items:
+                    index = next_index
                     if isinstance(item, ast.DesignatedInitializer):
-                        # limited support: accept and analyze initializer expression
-                        self.analyze_initializer(t.element, item.initializer, loc)
-                        # index designator may extend array
+                        for desig in item.designators:
+                            if desig.index is not None:
+                                val = self.eval_integer_constant(desig.index, require_constant=True)
+                                if val is None:
+                                    raise self.error(desig.index.location, "array designator must be an integer constant expression")
+                                index = int(val)
+                                break
+                            if desig.field:
+                                raise self.error(item.location, "field designator used for array initializer")
+                        if index < 0:
+                            raise self.error(item.location, "array designator index must be non-negative")
+                        item.array_index = index  # type: ignore[attr-defined]
+                        self.analyze_initializer(t.element, item.initializer, item.location)
                     else:
-                        self.analyze_initializer(t.element, item, loc)
-                    count += 1
-                if t.length is not None and count > t.length:
+                        item.array_index = index  # type: ignore[attr-defined]
+                        self.analyze_initializer(t.element, item, item.location)
+                    next_index = index + 1
+                if t.length is not None and next_index > t.length:
                     raise self.error(loc, "excess elements in array initializer")
                 return
             if isinstance(t, (StructType, UnionType)):
@@ -900,63 +1026,62 @@ class Analyzer:
                 fields = t.fields
                 idx = 0
                 for item in init.items:
+                    designated_field: Optional[str] = None
                     if isinstance(item, ast.DesignatedInitializer):
-                        # find field by designator .name if present
-                        if item.designators and item.designators[0].field:
-                            fname = item.designators[0].field
-                            fmap = t.field_map() if isinstance(t, StructType) else t.field_map()
-                            if fname not in fmap:
-                                raise self.error(loc, f"field '{fname}' not found in aggregate")
-                            ftype = fmap[fname].type
-                            self.analyze_initializer(ftype, item.initializer, loc)
-                            # reset idx naively
-                            # compute idx position
+                        if not item.designators:
+                            raise self.error(item.location, "empty designator in aggregate initializer")
+                        desig = item.designators[0]
+                        if len(item.designators) > 1:
+                            raise self.error(item.location, "nested designators are not supported by this backend")
+                        if desig.field:
+                            designated_field = desig.field
+                            fmap = t.field_map()
+                            if designated_field not in fmap:
+                                raise self.error(item.location, f"field '{designated_field}' not found in aggregate")
                             for i, f in enumerate(fields):
-                                if f.name == fname:
-                                    idx = i + 1
+                                if f.name == designated_field:
+                                    idx = i
                                     break
+                        elif desig.index is not None:
+                            val = self.eval_integer_constant(desig.index, require_constant=True)
+                            if val is None:
+                                raise self.error(desig.index.location, "aggregate designator must be an integer constant expression")
+                            idx = int(val)
                         else:
-                            if idx < len(fields):
-                                self.analyze_initializer(fields[idx].type, item.initializer, loc)
-                                idx += 1
-                            else:
-                                raise self.error(loc, "excess elements in struct/union initializer")
-                    else:
-                        if isinstance(t, UnionType):
-                            if idx >= 1 and len(fields) >= 1:
-                                # union initializes first member unless designated; extra is excess
-                                if idx >= 1:
-                                    raise self.error(loc, "excess elements in union initializer")
-                            if fields:
-                                self.analyze_initializer(fields[0].type, item, loc)
-                                idx = 1
-                            continue
-                        if idx >= len(fields):
-                            raise self.error(loc, "excess elements in struct initializer")
-                        self.analyze_initializer(fields[idx].type, item, loc)
+                            raise self.error(item.location, "invalid designator in aggregate initializer")
+                    if idx < len(fields):
+                        field = fields[idx]
+                        item.field_index = idx  # type: ignore[attr-defined]
+                        if designated_field:
+                            item.designated_field = designated_field  # type: ignore[attr-defined]
+                        child_init = item.initializer if isinstance(item, ast.DesignatedInitializer) else item
+                        self.analyze_initializer(field.type, child_init, item.location)
                         idx += 1
+                    else:
+                        raise self.error(item.location, f"excess elements in {'union' if isinstance(t, UnionType) else 'struct'} initializer")
                 return
             # scalar with braces: allow single element
             if len(init.items) == 1:
                 item = init.items[0]
                 if isinstance(item, ast.DesignatedInitializer):
-                    self.analyze_initializer(target_type, item.initializer, loc)
+                    self.analyze_initializer(target_type, item.initializer, item.location)
                 else:
-                    self.analyze_initializer(target_type, item, loc)
+                    self.analyze_initializer(target_type, item, item.location)
                 return
             if len(init.items) == 0:
                 return
             raise self.error(loc, "invalid brace-enclosed initializer for scalar type")
-        else:
-            # expression initializer
-            expr = init
-            et = self.analyze_expression(expr)
-            if not self.is_assignable(target_type, et, expr, check_const=False):
-                # string literal to char array special case
-                if isinstance(t, ArrayType) and isinstance(types.strip_qualifiers(t.element), IntegerType):
-                    if isinstance(expr, ast.StringLiteral):
-                        return
-                raise self.error(loc, "incompatible initializer type")
+        # expression initializer
+        expr = init
+        et = self.analyze_expression(expr)
+        if not self.is_assignable(target_type, et, expr, check_const=False):
+            # string literal to integer array is handled by array completion above
+            if isinstance(t, ArrayType) and isinstance(types.strip_qualifiers(t.element), IntegerType) and isinstance(expr, ast.StringLiteral):
+                return
+            raise self.error(loc, "incompatible initializer type")
+        self.require_lowering_supported(et, expr.location, "initializer expressions")
+        self.require_lowering_supported(target_type, expr.location, "initialized object types")
+        self.note_conversion(expr, target_type, "initializer")
 
     # ------------------------------------------------------------------
     # Expressions
@@ -1082,6 +1207,7 @@ class Analyzer:
                 raise self.error(expr.location, "operand of postfix increment/decrement must be a modifiable lvalue")
             if not (types.is_scalar_type(ot)):
                 raise self.error(expr.location, "invalid operand type for postfix increment/decrement")
+            self.require_lowering_supported(ot, expr.location, "increment/decrement operands")
             expr.value_category = "rvalue"  # type: ignore[attr-defined]
             return ot
         op = expr.op
@@ -1091,26 +1217,24 @@ class Analyzer:
                 raise self.error(expr.location, "operand of increment/decrement must be a modifiable lvalue")
             if not types.is_scalar_type(ot):
                 raise self.error(expr.location, "invalid operand type for increment/decrement")
-            expr.value_category = "lvalue" if False else "rvalue"  # C: prefix result is lvalue in C++? in C it's rvalue
+            self.require_lowering_supported(ot, expr.location, "increment/decrement operands")
+            expr.value_category = "rvalue"  # type: ignore[attr-defined]
             return ot
-        if op == "+":
-            if not types.is_arithmetic_type(ot):
-                raise self.error(expr.location, "unary '+' requires arithmetic operand")
+        if op in ("+", "-", "~"):
+            if op == "~":
+                if not types.is_integer_type(ot):
+                    raise self.error(expr.location, "bitwise not requires integer operand")
+            elif not types.is_arithmetic_type(ot):
+                raise self.error(expr.location, f"unary '{op}' requires arithmetic operand")
+            self.require_lowering_supported(ot, expr.location, "unary operands")
+            result = types.integer_promotions(ot, ctx) if types.is_integer_type(ot) else ot
+            self.note_conversion(expr.operand, result, f"unary '{op}' promotion", source=ot)
             expr.value_category = "rvalue"  # type: ignore[attr-defined]
-            return types.integer_promotions(ot, ctx) if types.is_integer_type(ot) else ot
-        if op == "-":
-            if not types.is_arithmetic_type(ot):
-                raise self.error(expr.location, "unary '-' requires arithmetic operand")
-            expr.value_category = "rvalue"  # type: ignore[attr-defined]
-            return types.integer_promotions(ot, ctx) if types.is_integer_type(ot) else ot
-        if op == "~":
-            if not types.is_integer_type(ot):
-                raise self.error(expr.location, "bitwise not requires integer operand")
-            expr.value_category = "rvalue"  # type: ignore[attr-defined]
-            return types.integer_promotions(ot, ctx)
+            return result
         if op == "!":
             if not types.is_scalar_type(ot):
                 raise self.error(expr.location, "logical not requires scalar operand")
+            self.require_lowering_supported(ot, expr.location, "logical operands")
             expr.value_category = "rvalue"  # type: ignore[attr-defined]
             return ctx.int_t
         if op == "&":
@@ -1133,6 +1257,7 @@ class Analyzer:
                 raise self.error(expr.location, "indirection requires pointer operand")
             if isinstance(types.strip_qualifiers(p.pointee), VoidType):
                 raise self.error(expr.location, "dereferencing pointer to void")
+            self.require_lowering_supported(p.pointee, expr.location, "dereferenced types")
             expr.value_category = "lvalue"  # type: ignore[attr-defined]
             return p.pointee
         raise self.error(expr.location, f"unsupported unary operator '{op}'")
@@ -1142,66 +1267,78 @@ class Analyzer:
         op = expr.op
         lt = self.analyze_expression(expr.left)
         rt = self.analyze_expression(expr.right)
-        # apply usual conversions for arithmetic/logical comparisons as needed
-        if op in ("*", "/", "%", "+", "-", "<<", ">>", "&", "^", "|"):
-            pass
+        ldt = self.decay_expr_type(expr.left, lt)
+        rdt = self.decay_expr_type(expr.right, rt)
+        lds, rds = types.strip_qualifiers(ldt), types.strip_qualifiers(rdt)
         expr.value_category = "rvalue"  # type: ignore[attr-defined]
 
-        if op in ("*", "/", "%"):
-            if not (types.is_arithmetic_type(lt) and types.is_arithmetic_type(rt)):
+        if op in ("*", "/", "%", "&", "^", "|"):
+            if not (types.is_arithmetic_type(lds) and types.is_arithmetic_type(rds)):
                 raise self.error(expr.location, f"invalid operands to binary '{op}'")
-            if op == "%" and not (types.is_integer_type(lt) and types.is_integer_type(rt)):
+            if op == "%" and not (types.is_integer_type(lds) and types.is_integer_type(rds)):
                 raise self.error(expr.location, "operands of '%' must have integer type")
-            return types.usual_arithmetic_conversions(lt, rt, ctx)
-        if op == "+":
-            ldt = self.decay_expr_type(expr.left, lt)
-            rdt = self.decay_expr_type(expr.right, rt)
-            if types.is_arithmetic_type(ldt) and types.is_arithmetic_type(rdt):
-                return types.usual_arithmetic_conversions(ldt, rdt, ctx)
-            if isinstance(types.strip_qualifiers(ldt), PointerType) and types.is_integer_type(rdt):
+            if op in ("&", "^", "|") and not (types.is_integer_type(lds) and types.is_integer_type(rds)):
+                raise self.error(expr.location, f"bitwise operator '{op}' requires integer operands")
+            self.require_lowering_supported(lds, expr.location, "binary operands")
+            self.require_lowering_supported(rds, expr.location, "binary operands")
+            result = types.usual_arithmetic_conversions(lds, rds, ctx)
+            self.note_conversion(expr.left, result, f"binary '{op}' conversion", source=ldt)
+            self.note_conversion(expr.right, result, f"binary '{op}' conversion", source=rdt)
+            return result
+        if op in ("+", "-"):
+            if types.is_arithmetic_type(lds) and types.is_arithmetic_type(rds):
+                self.require_lowering_supported(lds, expr.location, "binary operands")
+                self.require_lowering_supported(rds, expr.location, "binary operands")
+                result = types.usual_arithmetic_conversions(lds, rds, ctx)
+                self.note_conversion(expr.left, result, f"binary '{op}' conversion", source=ldt)
+                self.note_conversion(expr.right, result, f"binary '{op}' conversion", source=rdt)
+                return result
+            if op == "+" and isinstance(lds, PointerType) and types.is_integer_type(rds):
+                self.require_lowering_supported(lds.pointee, expr.location, "pointer arithmetic pointee types")
                 return ldt
-            if isinstance(types.strip_qualifiers(rdt), PointerType) and types.is_integer_type(ldt):
+            if op == "+" and isinstance(rds, PointerType) and types.is_integer_type(lds):
+                self.require_lowering_supported(rds.pointee, expr.location, "pointer arithmetic pointee types")
                 return rdt
-            raise self.error(expr.location, "invalid operands to binary '+'")
-        if op == "-":
-            ldt = self.decay_expr_type(expr.left, lt)
-            rdt = self.decay_expr_type(expr.right, rt)
-            if types.is_arithmetic_type(ldt) and types.is_arithmetic_type(rdt):
-                return types.usual_arithmetic_conversions(ldt, rdt, ctx)
-            if isinstance(types.strip_qualifiers(ldt), PointerType) and types.is_integer_type(rdt):
+            if op == "-" and isinstance(lds, PointerType) and types.is_integer_type(rds):
+                self.require_lowering_supported(lds.pointee, expr.location, "pointer arithmetic pointee types")
                 return ldt
-            if isinstance(types.strip_qualifiers(ldt), PointerType) and isinstance(types.strip_qualifiers(rdt), PointerType):
-                # pointer difference -> ptrdiff_t
+            if op == "-" and isinstance(lds, PointerType) and isinstance(rds, PointerType):
+                self.require_lowering_supported(lds.pointee, expr.location, "pointer difference pointee types")
                 return ctx.ptrdiff_t
-            raise self.error(expr.location, "invalid operands to binary '-'")
+            raise self.error(expr.location, f"invalid operands to binary '{op}'")
         if op in ("<<", ">>"):
-            if not (types.is_integer_type(lt) and types.is_integer_type(rt)):
+            if not (types.is_integer_type(lds) and types.is_integer_type(rds)):
                 raise self.error(expr.location, "shift operands must have integer type")
-            return types.integer_promotions(lt, ctx)
-        if op in ("<", "<=", ">", ">="):
-            ldt = self.decay_expr_type(expr.left, lt)
-            rdt = self.decay_expr_type(expr.right, rt)
-            if types.is_arithmetic_type(ldt) and types.is_arithmetic_type(rdt):
+            result = types.integer_promotions(lds, ctx)
+            self.note_conversion(expr.left, result, f"binary '{op}' promotion", source=ldt)
+            self.note_conversion(expr.right, ctx.int_t, "shift count promotion", source=rdt)
+            return result
+        if op in ("<", "<=", ">", ">=", "==", "!="):
+            if types.is_arithmetic_type(lds) and types.is_arithmetic_type(rds):
+                self.require_lowering_supported(lds, expr.location, "comparison operands")
+                self.require_lowering_supported(rds, expr.location, "comparison operands")
+                common = types.usual_arithmetic_conversions(lds, rds, ctx)
+                self.note_conversion(expr.left, common, "comparison conversion", source=ldt)
+                self.note_conversion(expr.right, common, "comparison conversion", source=rdt)
                 return ctx.int_t
-            if isinstance(types.strip_qualifiers(ldt), PointerType) and isinstance(types.strip_qualifiers(rdt), PointerType):
+            if isinstance(lds, PointerType) and isinstance(rds, PointerType):
+                if not (
+                    types.compatible_types(types.strip_qualifiers(lds.pointee), types.strip_qualifiers(rds.pointee))
+                    or isinstance(types.strip_qualifiers(lds.pointee), VoidType)
+                    or isinstance(types.strip_qualifiers(rds.pointee), VoidType)
+                ):
+                    raise self.error(expr.location, f"incompatible pointer operands to '{op}'")
+                return ctx.int_t
+            if isinstance(lds, PointerType) and self.is_null_pointer_constant(expr.right, rt):
+                return ctx.int_t
+            if isinstance(rds, PointerType) and self.is_null_pointer_constant(expr.left, lt):
                 return ctx.int_t
             raise self.error(expr.location, f"invalid operands to relational operator '{op}'")
-        if op in ("==", "!="):
-            ldt = self.decay_expr_type(expr.left, lt)
-            rdt = self.decay_expr_type(expr.right, rt)
-            if types.is_arithmetic_type(ldt) and types.is_arithmetic_type(rdt):
-                return ctx.int_t
-            if isinstance(types.strip_qualifiers(ldt), PointerType) or isinstance(types.strip_qualifiers(rdt), PointerType):
-                # allow pointer-pointer, pointer-int0 in general? simplified
-                return ctx.int_t
-            raise self.error(expr.location, f"invalid operands to equality operator '{op}'")
-        if op in ("&", "^", "|"):
-            if not (types.is_integer_type(lt) and types.is_integer_type(rt)):
-                raise self.error(expr.location, f"bitwise operator '{op}' requires integer operands")
-            return types.usual_arithmetic_conversions(lt, rt, ctx)
         if op in ("&&", "||"):
-            if not (types.is_scalar_type(lt) and types.is_scalar_type(rt)):
+            if not (types.is_scalar_type(lds) and types.is_scalar_type(rds)):
                 raise self.error(expr.location, f"logical operator '{op}' requires scalar operands")
+            self.require_lowering_supported(lds, expr.location, "logical operands")
+            self.require_lowering_supported(rds, expr.location, "logical operands")
             return ctx.int_t
         raise self.error(expr.location, f"unsupported binary operator '{op}'")
 
@@ -1211,19 +1348,30 @@ class Analyzer:
         rt = self.analyze_expression(expr.right)
         if not self.is_modifiable_lvalue(expr.left, lt):
             raise self.error(expr.location, "left operand of assignment must be a modifiable lvalue")
+        self.require_lowering_supported(lt, expr.location, "assignment target types")
+        self.require_lowering_supported(rt, expr.location, "assignment source types")
         if expr.op == "=":
             if not self.is_assignable(lt, rt, expr.right, check_const=False):
                 raise self.error(expr.location, "incompatible types in assignment")
+            self.note_conversion(expr.right, lt, "assignment conversion", source=rt)
             expr.value_category = "rvalue"  # type: ignore[attr-defined]
             return lt
-        # compound assignments: basic check
         binop = expr.op[:-1]
-        # synthesize check by analyzing as binary in effect? simplified: require compatible arithmetic/pointer forms
-        if binop in ("+", "-") and isinstance(types.strip_qualifiers(lt), PointerType) and types.is_integer_type(rt):
+        lts, rts = types.strip_qualifiers(lt), types.strip_qualifiers(rt)
+        if binop in ("+", "-") and isinstance(lts, PointerType) and types.is_integer_type(rts):
+            self.require_lowering_supported(lts.pointee, expr.location, "pointer arithmetic pointee types")
             expr.value_category = "rvalue"  # type: ignore[attr-defined]
             return lt
-        if not (types.is_arithmetic_type(lt) and types.is_arithmetic_type(rt)):
+        if binop in ("&", "^", "|", "<<", ">>", "%") and not (
+            types.is_integer_type(lts) and types.is_integer_type(rts)
+        ):
             raise self.error(expr.location, f"invalid operands to compound assignment '{expr.op}'")
+        if not (types.is_arithmetic_type(lts) and types.is_arithmetic_type(rts)):
+            raise self.error(expr.location, f"invalid operands to compound assignment '{expr.op}'")
+        common = types.usual_arithmetic_conversions(lts, rts, ctx)
+        self.note_conversion(expr.left, common, f"compound '{expr.op}' conversion", source=lt)
+        self.note_conversion(expr.right, common, f"compound '{expr.op}' conversion", source=rt)
+        self.note_conversion(expr.right, lt, "assignment conversion", source=common)
         expr.value_category = "rvalue"  # type: ignore[attr-defined]
         return lt
 
@@ -1232,25 +1380,46 @@ class Analyzer:
         ct = self.analyze_expression(expr.condition)
         if not types.is_scalar_type(ct):
             raise self.error(expr.location, "conditional expression condition must have scalar type")
+        self.require_lowering_supported(ct, expr.location, "conditional conditions")
         tt = self.analyze_expression(expr.then_expr) if expr.then_expr is not None else ct
         et = self.analyze_expression(expr.else_expr)
         expr.value_category = "rvalue"  # type: ignore[attr-defined]
-        if types.is_arithmetic_type(tt) and types.is_arithmetic_type(et):
-            return types.usual_arithmetic_conversions(tt, et, ctx)
         ttd = self.decay_expr_type(expr.then_expr, tt) if expr.then_expr else tt
         etd = self.decay_expr_type(expr.else_expr, et)
-        if types.compatible_types(ttd, etd):
-            return ttd
-        if isinstance(types.strip_qualifiers(ttd), PointerType) and isinstance(types.strip_qualifiers(etd), PointerType):
-            return ttd
-        # void cases
-        if isinstance(types.strip_qualifiers(tt), VoidType) and isinstance(types.strip_qualifiers(et), VoidType):
-            return ctx.void_t
-        return tt
+        result: Type
+        if types.is_arithmetic_type(ttd) and types.is_arithmetic_type(etd):
+            self.require_lowering_supported(ttd, expr.location, "conditional operands")
+            self.require_lowering_supported(etd, expr.location, "conditional operands")
+            result = types.usual_arithmetic_conversions(ttd, etd, ctx)
+        elif types.compatible_types(ttd, etd):
+            result = ttd
+        elif isinstance(types.strip_qualifiers(ttd), PointerType) and isinstance(types.strip_qualifiers(etd), PointerType):
+            result = ttd
+        elif isinstance(types.strip_qualifiers(ttd), VoidType) and isinstance(types.strip_qualifiers(etd), VoidType):
+            result = ctx.void_t
+        else:
+            raise self.error(expr.location, "incompatible operands to conditional expression")
+        if expr.then_expr is not None:
+            self.note_conversion(expr.then_expr, result, "conditional conversion", source=ttd)
+        self.note_conversion(expr.else_expr, result, "conditional conversion", source=etd)
+        return result
 
     def analyze_cast(self, expr: ast.CastExpression) -> Type:
         ttype = self.analyze_type_name(expr.type_name)
-        self.analyze_expression(expr.operand)
+        ot = self.analyze_expression(expr.operand)
+        target = types.strip_qualifiers(ttype)
+        source = types.strip_qualifiers(ot)
+        if isinstance(target, ArrayType) or isinstance(target, FunctionType):
+            raise self.error(expr.location, "cast to array or function type is invalid")
+        if isinstance(source, (StructType, UnionType)) or isinstance(target, (StructType, UnionType)):
+            raise self.error(expr.location, "casts involving struct or union types are not supported")
+        if isinstance(target, VoidType):
+            expr.value_category = "rvalue"  # type: ignore[attr-defined]
+            return ttype
+        if not (types.is_scalar_type(target) and types.is_scalar_type(source)):
+            raise self.error(expr.location, "invalid cast operand or target type")
+        self.require_lowering_supported(source, expr.location, "cast operands")
+        self.require_lowering_supported(target, expr.location, "cast targets")
         expr.value_category = "rvalue"  # type: ignore[attr-defined]
         return ttype
 
@@ -1276,6 +1445,8 @@ class Analyzer:
             raise self.error(expr.location, "called object is not a function or function pointer")
         assert isinstance(ft, FunctionType)
         args_t = [self.analyze_expression(a) for a in expr.arguments]
+        for arg, at in zip(expr.arguments, args_t):
+            self.require_lowering_supported(at, arg.location, "call arguments")
         if not ft.no_prototype:
             fixed = len(ft.params)
             if not ft.variadic and len(args_t) != fixed:
@@ -1285,8 +1456,17 @@ class Analyzer:
             for i, pt in enumerate(ft.params):
                 at = args_t[i]
                 if not self.is_assignable(pt.type, at, expr.arguments[i], check_const=False):
-                    # allow basic pointer/integer cases leniently? keep diagnostic useful
-                    pass
+                    raise self.error(
+                        expr.arguments[i].location,
+                        f"incompatible argument {i + 1}: expected '{pt.type.describe()}', got '{at.describe()}'",
+                    )
+                self.note_conversion(expr.arguments[i], pt.type, "argument conversion", source=at)
+            if ft.variadic:
+                for arg, at in zip(expr.arguments[fixed:], args_t[fixed:]):
+                    if types.is_integer_type(at):
+                        promoted = types.integer_promotions(at, self.ctx)
+                        self.note_conversion(arg, promoted, "default argument promotion", source=at)
+        self.require_lowering_supported(ft.return_type, expr.location, "call return types")
         expr.value_category = "rvalue"  # type: ignore[attr-defined]
         return ft.return_type
 
@@ -1335,12 +1515,29 @@ class Analyzer:
         if isinstance(expr.operand, ast.TypeName):
             t = self.analyze_type_name(expr.operand)
         elif isinstance(expr.operand, ast.Expression):
+            # The operand is unevaluated: analyze it for its semantic type but do
+            # not apply array/function decay. `analyze_expression` does not decay
+            # on its own, so the declared type is preserved here.
             t = self.analyze_expression(expr.operand)
         else:
             raise self.error(expr.location, "invalid sizeof operand")
-        # sizeof result type is size_t (unsigned long on Nova64)
+        st = types.strip_qualifiers(t)
+        if isinstance(st, VoidType):
+            raise self.error(expr.location, "sizeof(void) is invalid")
+        if isinstance(st, FunctionType):
+            raise self.error(expr.location, "sizeof(function type) is invalid")
+        if isinstance(st, ArrayType) and (
+            st.length is None or st.element.is_incomplete() or st.element.sizeof() is None
+        ):
+            raise self.error(expr.location, "sizeof(incomplete array type) is invalid")
+        if st.is_incomplete() or st.sizeof() is None:
+            raise self.error(expr.location, f"sizeof incomplete type '{t.describe()}' is invalid")
+        size = st.sizeof()
+        assert size is not None
+        # sizeof result type is size_t (unsigned long on Nova64). The value is a
+        # compile-time constant consumed by array bounds, enum values and codegen.
         expr.value_category = "rvalue"  # type: ignore[attr-defined]
-        # do not require complete type in all unevaluated contexts in this simplified model, but usually required
+        expr.const_value = size  # type: ignore[attr-defined]
         return self.ctx.size_t
 
     # ------------------------------------------------------------------
@@ -1383,40 +1580,95 @@ class Analyzer:
         return True
 
     def decay_expr_type(self, expr: Optional[ast.Expression], t: Type) -> Type:
-        # arrays/functions decay in many expression contexts; lvalue category not strictly required here
+        # Arrays and function designators decay in value contexts. Record the
+        # decayed type so codegen does not need to infer it again.
         st = types.strip_qualifiers(t)
+        decayed: Type = t
         if isinstance(st, ArrayType):
-            return PointerType(st.element)
-        if isinstance(st, FunctionType):
-            return PointerType(st)
-        return t
+            decayed = PointerType(st.element)
+        elif isinstance(st, FunctionType):
+            decayed = PointerType(st)
+        if expr is not None:
+            expr.decayed_type = decayed  # type: ignore[attr-defined]
+            if decayed is not t:
+                expr.decay_kind = "array-to-pointer" if isinstance(st, ArrayType) else "function-to-pointer"  # type: ignore[attr-defined]
+        return decayed
+
+    def is_null_pointer_constant(self, expr: Optional[ast.Expression], t: Type) -> bool:
+        """C's null pointer constant: an integer constant expression of value 0."""
+        if expr is None or not types.is_integer_type(t):
+            return False
+        value = self.eval_integer_constant(expr)
+        return value is not None and value == 0
+
+    @staticmethod
+    def pointer_qualifiers_compatible(target: Type, source: Type) -> bool:
+        """Allow adding qualifiers, never discarding them, in pointer assignments."""
+        tq, sq = target.qualifiers, source.qualifiers
+        return (
+            (not sq.const or tq.const)
+            and (not sq.volatile or tq.volatile)
+            and (not sq.restrict or tq.restrict)
+            and (not sq.atomic or tq.atomic)
+        )
+
+    def pointer_assignment_ok(self, target: PointerType, source: PointerType) -> bool:
+        tp, sp = target.pointee, source.pointee
+        if not self.pointer_qualifiers_compatible(tp, sp):
+            return False
+        tu, su = types.strip_qualifiers(tp), types.strip_qualifiers(sp)
+        if isinstance(tu, VoidType) or isinstance(su, VoidType):
+            return True
+        return types.compatible_types(tu, su)
 
     def is_assignable(self, lhs_type: Type, rhs_type: Type, rhs_expr: Optional[ast.Expression], check_const: bool = False) -> bool:
         lt = types.strip_qualifiers(lhs_type)
-        rt = types.strip_qualifiers(rhs_type)
-        rtd = self.decay_expr_type(rhs_expr, rhs_type)
-        rtds = types.strip_qualifiers(rtd)
-        if types.is_arithmetic_type(lt) and types.is_arithmetic_type(rtds):
-            return True
-        if isinstance(lt, (StructType, UnionType)) and types.compatible_types(lt, rtds):
-            return True
-        if isinstance(lt, PointerType) and isinstance(rtds, PointerType):
-            # allow void* compatibility and compatible pointee types (simplified qualifiers)
-            lp = lt.pointee
-            rp = rtds.pointee
-            if isinstance(types.strip_qualifiers(lp), VoidType) or isinstance(types.strip_qualifiers(rp), VoidType):
-                return True
-            if types.compatible_types(lp, rp):
-                return True
-            # allow char* special cases? conservative
+        rtd = types.strip_qualifiers(self.decay_expr_type(rhs_expr, rhs_type))
+        if isinstance(lt, (ArrayType, FunctionType)):
             return False
-        if isinstance(lt, PointerType) and isinstance(rhs_expr, ast.IntegerLiteral) and rhs_expr.number == 0:
+        if isinstance(lt, BoolType) and types.is_scalar_type(rtd):
             return True
-        if isinstance(lt, BoolType) and types.is_scalar_type(rtds):
+        if types.is_arithmetic_type(lt) and types.is_arithmetic_type(rtd):
+            return True
+        if isinstance(lt, (StructType, UnionType)):
+            return types.compatible_types(lt, rtd)
+        if isinstance(lt, PointerType) and isinstance(rtd, PointerType):
+            return self.pointer_assignment_ok(lt, rtd)
+        if isinstance(lt, PointerType) and self.is_null_pointer_constant(rhs_expr, rhs_type):
             return True
         return types.compatible_types(lhs_type, rhs_type)
 
     def eval_integer_constant(self, expr: ast.Expression, require_constant: bool = False) -> Optional[int]:
+        """Evaluate an integer constant expression, normalized to its C type.
+
+        The raw evaluator works with Python integers; this wrapper applies the
+        expression's Nova64 width and signedness so folded values used by array
+        bounds, case labels and codegen match the target model.
+        """
+        value = self._eval_integer_constant_raw(expr, require_constant=require_constant)
+        if value is not None:
+            value = self._normalize_integer_constant(value, getattr(expr, "resolved_type", None))
+            expr.const_value = value  # type: ignore[attr-defined]
+        return value
+
+    def _normalize_integer_constant(self, value: int, typ: Optional[Type]) -> int:
+        if typ is None:
+            return value
+        t = types.strip_qualifiers(typ)
+        size = t.sizeof()
+        if size is None or not isinstance(t, (IntegerType, BoolType, EnumType)):
+            return value
+        bits = size * 8
+        mask = (1 << bits) - 1
+        value &= mask
+        signed = t.signed if isinstance(t, IntegerType) else True
+        if isinstance(t, EnumType):
+            signed = t.underlying.signed
+        if signed and value & (1 << (bits - 1)):
+            value -= 1 << bits
+        return value
+
+    def _eval_integer_constant_raw(self, expr: ast.Expression, require_constant: bool = False) -> Optional[int]:
         # Try to evaluate constant integer expressions in a limited but useful form.
         if isinstance(expr, ast.IntegerLiteral):
             return int(expr.number or 0)
@@ -1513,11 +1765,8 @@ class Analyzer:
                 return int(v)
             return None
         if isinstance(expr, ast.SizeofExpression):
-            # try to compute sizeof for constant-known types
-            if isinstance(expr.operand, ast.TypeName):
-                # analyze type name in a temporary way? not safe without scope context in all cases
-                return None
-            return None
+            # analyze_sizeof() stores the computed size; the wrapper returns it.
+            return getattr(expr, "const_value", None)
         return None
 
 

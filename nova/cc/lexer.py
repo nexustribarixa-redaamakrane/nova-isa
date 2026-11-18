@@ -52,6 +52,7 @@ class Token:
 # Keywords required by the Phase 1 subset plus common C keywords so they are not
 # misclassified as identifiers.
 KEYWORDS = {
+    "_Atomic",
     "_Bool",
     "_Complex",
     "_Generic",
