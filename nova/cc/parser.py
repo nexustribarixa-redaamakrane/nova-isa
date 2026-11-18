@@ -675,11 +675,17 @@ class Parser:
         return left
 
     def parse_cast_expression(self) -> ast.Expression:
-        # Cast: '(' type-name ')' cast-expression
+        # Cast or compound literal: '(' type-name ')' cast-expression | '{' initializer-list '}'
         if self.check(TokenKind.PUNCT, "(") and self._looks_like_cast():
             loc = self.take().location  # '('
             tname = self.parse_type_name()
             self.expect_punct(")", "expected ')' after cast type")
+            if self.check(TokenKind.PUNCT, "{"):
+                init = self.parse_initializer()
+                if not isinstance(init, ast.InitializerList):
+                    # parse_initializer returns InitializerList when '{' seen
+                    init = ast.InitializerList(location=init.location, items=[init])
+                return ast.CompoundLiteral(location=loc, type_name=tname, initializer=init)
             operand = self.parse_cast_expression()
             return ast.CastExpression(location=loc, type_name=tname, operand=operand)
         return self.parse_unary_expression()
@@ -814,6 +820,8 @@ class Parser:
                 self.take()
             value = "".join(parts)
             return ast.StringLiteral(location=loc, value=value, parts=parts)
+        if tok.kind == TokenKind.KEYWORD and tok.value == "_Generic":
+            return self.parse_generic_selection()
         if tok.kind in (TokenKind.IDENT, TokenKind.KEYWORD):
             # identifier (including keywords used as identifiers in some contexts? usually not; but take value)
             if tok.kind == TokenKind.KEYWORD and tok.value in {"sizeof"}:
@@ -826,6 +834,28 @@ class Parser:
             self.expect_punct(")", "expected ')' after expression")
             return expr
         raise self.error_here("expected expression")
+
+    def parse_generic_selection(self) -> ast.GenericSelection:
+        loc = self.expect_kind(TokenKind.KEYWORD, "expected '_Generic'").location
+        self.expect_punct("(", "expected '(' after '_Generic'")
+        control = self.parse_assignment_expression()
+        self.expect_punct(",", "expected ',' after controlling expression in _Generic")
+        associations: List[ast.GenericAssociation] = []
+        while True:
+            if self.current().kind == TokenKind.KEYWORD and self.current().value == "default" and self.check(TokenKind.PUNCT, ":", offset=1):
+                self.take()  # default
+                self.expect_punct(":", "expected ':' in generic association")
+                expr = self.parse_assignment_expression()
+                associations.append(ast.GenericAssociation(location=loc, type_name=None, expression=expr))
+            else:
+                tname = self.parse_type_name()
+                self.expect_punct(":", "expected ':' after type name in generic association")
+                expr = self.parse_assignment_expression()
+                associations.append(ast.GenericAssociation(location=tname.location, type_name=tname, expression=expr))
+            if self.match_punct(")"):
+                break
+            self.expect_punct(",", "expected ',' or ')' in generic association list")
+        return ast.GenericSelection(location=loc, controlling=control, associations=associations)
 
     # ------------------------------------------------------------------
     # Statements

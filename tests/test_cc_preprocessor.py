@@ -753,3 +753,153 @@ def test_unknown_pragma_ignored_hardening():
     out = values(pp_tokens(src))
     assert "x" in out
 
+
+# ---------------------------------------------------------------------------
+# Phase 1 Step 4 hardening: source mapping, computed includes, _Pragma, modes
+# ---------------------------------------------------------------------------
+
+
+def test_splice_maps_token_locations_to_physical_lines():
+    # '=' and the rest of the statement are on physical line 2 even though they
+    # form one logical line with line 1 after backslash-newline splicing.
+    toks = pp_tokens("int x\\\n = 1;\n", filename="splice.c")
+    by_value = {t.value: t for t in toks}
+    assert by_value["int"].location.line == 1
+    assert by_value["int"].location.column == 1
+    assert by_value["="].location.line == 2
+    assert by_value["="].location.column == 2
+    assert by_value["1"].location.line == 2
+    assert by_value["1"].location.column == 4
+
+
+def test_splice_segments_record_logical_offsets():
+    from nova.cc.preprocessor import splice_lines
+
+    logical = splice_lines("ab\\\ncd\\\nef\n", "t.c")
+    # A trailing newline yields a final empty logical line.
+    line = logical[0]
+    assert line.text == "abcdef"
+    assert [s.phys_line for s in line.segments] == [1, 2, 3]
+    assert [s.logical_start for s in line.segments] == [0, 2, 4]
+
+
+def test_leading_space_information_preserved():
+    toks = pp_tokens("int x = 1;", filename="t.c")
+    by_value = {t.value: t for t in toks}
+    assert by_value["int"].leading_space is False
+    assert by_value["x"].leading_space is True
+    assert by_value["="].leading_space is True
+    assert by_value[";"].leading_space is False
+
+
+def test_preprocessing_output_is_deterministic():
+    src = """
+    #define A 1 + 2
+    int x = A;
+    """
+    assert pp(src) == pp(src)
+    assert values(pp_tokens(src)) == values(pp_tokens(src))
+
+
+def test_computed_include_quoted_header_name(tmp_path):
+    (tmp_path / "hdr.h").write_text("int from_header;\n", encoding="utf-8")
+    src = '#define H "hdr.h"\n#include H\n'
+    out = pp(src, filename=str(tmp_path / "t.c"), include_paths=[str(tmp_path)])
+    assert "from_header" in out
+
+
+def test_computed_include_angle_header_name(tmp_path):
+    (tmp_path / "hdr.h").write_text("int from_header;\n", encoding="utf-8")
+    src = "#define H <hdr.h>\n#include H\n"
+    out = pp(src, filename=str(tmp_path / "t.c"), include_paths=[str(tmp_path)])
+    assert "from_header" in out
+
+
+def test_computed_include_nested_macro_expansion(tmp_path):
+    (tmp_path / "feature.h").write_text("int feature_flag;\n", encoding="utf-8")
+    src = "#define BASE feature\n#define HDR(x) <x.h>\n#include HDR(BASE)\n"
+    out = pp(src, filename=str(tmp_path / "t.c"), include_paths=[str(tmp_path)])
+    assert "feature_flag" in out
+
+
+def test_computed_include_token_boundary_and_whitespace_variants(tmp_path):
+    (tmp_path / "hdr.h").write_text("int variant;\n", encoding="utf-8")
+    for operand in ("< h d r . h >", "<hdr . h>", "<hd r.h>"):
+        src = "#define H " + operand + "\n#include H\n"
+        out = pp(src, filename=str(tmp_path / "t.c"), include_paths=[str(tmp_path)])
+        assert "variant" in out, operand
+
+
+def test_computed_include_malformed_operands_are_source_located():
+    for src, message in (
+        ("#include <missing\n", "unterminated include file name"),
+        ("#include\n", "empty #include directive"),
+        ("#define H 42\n#include H\n", "invalid #include directive"),
+    ):
+        with pytest.raises(CompileError) as excinfo:
+            pp(src, filename="bad_include.c")
+        assert message in excinfo.value.message
+        assert excinfo.value.location.file == "bad_include.c"
+
+
+def test_include_path_safety_retained():
+    # Absolute paths and parent traversal must never resolve, even with an
+    # include path configured.
+    for name in ('"/etc/passwd"', '"../secret.h"', '"sub/../../secret.h"'):
+        with pytest.raises(CompileError):
+            pp("#include " + name, filename="t.c", include_paths=["."])
+
+
+def test_pragma_operator():
+    out = pp('_Pragma("once")\nint x;\n', filename="t.c")
+    assert "once" not in out
+    assert "x" in out
+
+
+def test_pragma_operator_from_macro_expansion():
+    out = pp('#define DO_PRAGMA _Pragma("once")\nDO_PRAGMA\nint x;\n', filename="t.c")
+    assert "DO_PRAGMA" not in out
+    assert "x" in out
+
+
+def test_pragma_operator_stringizes_macro_argument():
+    out = pp('#define P(x) _Pragma(#x)\nP(once)\nint z;\n', filename="t.c")
+    assert "once" not in out
+    assert "z" in out
+
+
+def test_pragma_operator_bad_operand_diagnostic():
+    with pytest.raises(CompileError) as excinfo:
+        pp("_Pragma(42)\n", filename="bad_pragma.c")
+    assert "string literal" in excinfo.value.message
+
+
+def test_language_modes_define_consistent_standard_macros():
+    def macros(language: str):
+        src = """
+        #if defined(__STDC__)
+        STD
+        #endif
+        #if defined(__STDC_VERSION__)
+        VERSION
+        #endif
+        """
+        return " ".join(pp(src, filename="t.c", language=language).split())
+
+    assert macros("nova-c11") == "STD"
+    assert macros("c99") == "STD VERSION"
+    assert macros("c11") == "STD VERSION"
+    assert macros("custom") == ""
+
+
+def test_gnu_varargs_extension_still_documented_in_macro_behavior():
+    # GNU ', ## __VA_ARGS__' remains an extension: the comma is removed when the
+    # variadic argument is empty.
+    out = pp(
+        "#define LOG(f, ...) f(0, ## __VA_ARGS__)\nLOG(g)\nLOG(h, 1)\n",
+        filename="t.c",
+    )
+    flat = "".join(out.split())
+    assert "g(0)" in flat
+    assert "h(0,1)" in flat
+

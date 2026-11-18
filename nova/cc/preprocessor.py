@@ -163,15 +163,16 @@ class Preprocessor:
             # Logical location state for this source: can be changed by #line.
             logical_file = filename
             line_override: Optional[Tuple[int, int]] = None  # (physical_line, logical_line)
-            for line_text, phys_line_no, raw_had_directive in logical_lines:
+            for logical in logical_lines:
+                line_text = logical.text
+                phys_line_no = logical.start_phys_line
                 logical_line_no = phys_line_no
                 if line_override is not None:
                     base_phys, base_logical = line_override
                     logical_line_no = base_logical + (phys_line_no - base_phys)
                 self._process_logical_line(line_text, logical_line_no, logical_file, directory, output, depth,
-                                           phys_filename=filename)
-                # If directive changed mapping, update state (handled via return? easier: detect #line effect)
-                # _process_logical_line/_handle_directive may set pending override via attributes
+                                           phys_filename=filename, splice_segments=logical.segments)
+                # If directive changed mapping, update state
                 if hasattr(self, "_pending_line_override"):
                     override = getattr(self, "_pending_line_override")
                     delattr(self, "_pending_line_override")
@@ -198,15 +199,16 @@ class Preprocessor:
 
     def _process_logical_line(self, line_text: str, line_no: int, filename: str,
                               directory: Path, output: List[Token], depth: int,
-                              phys_filename: Optional[str] = None) -> None:
+                              phys_filename: Optional[str] = None,
+                              splice_segments: Optional[List[SpliceSegment]] = None) -> None:
         stripped_leading = line_text.lstrip(" \t\v\f")
         if stripped_leading.startswith("#"):
             self._handle_directive(line_text, line_no, filename, directory, output, depth,
-                                   phys_filename=phys_filename)
+                                   phys_filename=phys_filename, splice_segments=splice_segments)
             return
         if not self._current_active():
             return
-        tokens = _lex_fragment(line_text, filename, line_no)
+        tokens = _lex_fragment(line_text, filename, line_no, splice_segments=splice_segments)
         if not tokens:
             return
         expanded = self._expand_tokens(tokens, set(), 0)
@@ -218,7 +220,8 @@ class Preprocessor:
 
     def _handle_directive(self, line_text: str, line_no: int, filename: str,
                           directory: Path, output: List[Token], depth: int,
-                          phys_filename: Optional[str] = None) -> None:
+                          phys_filename: Optional[str] = None,
+                          splice_segments: Optional[List[SpliceSegment]] = None) -> None:
         # Locate '#' after leading whitespace in the logical line.
         idx = 0
         while idx < len(line_text) and line_text[idx] in " \t\v\f":
@@ -487,9 +490,7 @@ class Preprocessor:
 
     def _parse_include_name(self, arg_text: str, loc: SourceLocation) -> Tuple[str, bool]:
         s = arg_text.lstrip(" \t\v\f")
-        # Compute macros are not expanded in #include in this simplified form except
-        # when the argument is not a direct header-name form; but easier: first try
-        # direct forms.
+        # Direct header-name forms
         if s.startswith('"'):
             end = s.find('"', 1)
             if end == -1:
@@ -508,14 +509,27 @@ class Preprocessor:
             if tail:
                 raise CompileError.at(loc, "unexpected tokens after #include")
             return name, True
-        # Computed include: expand macros and expect a string or <...> sequence.
+        # Computed include: expand macros and reconstruct header names from token spellings.
         toks = _lex_fragment(s, loc.file, loc.line)
+        if not toks:
+            raise CompileError.at(loc, "empty #include directive")
         expanded = self._expand_tokens(toks, set(), 0)
         if len(expanded) == 1 and expanded[0].kind == TokenKind.STRING:
             return expanded[0].string or "", False
-        # Try to reconstruct < ... > form
-        if expanded and expanded[0].value == "<" and expanded[-1].value == ">":
-            name = "".join(t.value for t in expanded[1:-1])
+        # Reconstruct < ... > form. Header-name tokens include punctuation like '.' and '/'
+        # which the ordinary lexer represents as separate tokens; joining spellings is
+        # deterministic and handles nested macro expansion and whitespace variants.
+        if expanded[0].value == "<":
+            close = next((i for i, t in enumerate(expanded) if t.value == ">"), None)
+            if close is None:
+                raise CompileError.at(loc, "unterminated include file name")
+            if any(t.kind == TokenKind.STRING for t in expanded[1:close]):
+                raise CompileError.at(loc, "invalid token in include file name")
+            if close + 1 != len(expanded):
+                raise CompileError.at(loc, "unexpected tokens after #include")
+            name = "".join(t.value for t in expanded[1:close])
+            if not name:
+                raise CompileError.at(loc, "empty include file name")
             return name, True
         raise CompileError.at(loc, "invalid #include directive")
 
@@ -593,6 +607,13 @@ class Preprocessor:
                     val = tok.location.line
                     output.append(Token(TokenKind.INT, str(val), tok.location, number=val))
                     continue
+                if tok.value == "_Pragma":
+                    # _Pragma operator (C99): _Pragma("...") acts like a #pragma directive.
+                    if stream and stream[0][0].value == "(":
+                        prag = self._collect_pragma_operand(stream, tok.location)
+                        # Apply pragma at expansion point using token location file.
+                        self._directive_pragma(" " + prag, tok.location, tok.location.file, Path(tok.location.file).parent if tok.location.file not in ("<stdin>", "<builtin>") else Path.cwd())
+                        continue
                 macro = self.macros.get(tok.value)
                 if macro is None or tok.value in hide:
                     output.append(tok)
@@ -651,6 +672,11 @@ class Preprocessor:
                     val = tok.location.line
                     output.append(Token(TokenKind.INT, str(val), tok.location, number=val))
                     continue
+                if tok.value == "_Pragma":
+                    if stream and stream[0][0].value == "(":
+                        prag = self._collect_pragma_operand(stream, tok.location)
+                        self._directive_pragma(" " + prag, tok.location, tok.location.file, Path(tok.location.file).parent if tok.location.file not in ("<stdin>", "<builtin>") else Path.cwd())
+                        continue
                 macro = self.macros.get(tok.value)
                 if macro is None or tok.value in hide:
                     output.append(tok)
@@ -677,6 +703,25 @@ class Preprocessor:
             else:
                 output.append(tok)
         return output
+
+    def _collect_pragma_operand(self, stream: List[Tuple[Token, frozenset]], loc: SourceLocation) -> str:
+        """Consume a _Pragma("...") operand from stream and return its decoded payload."""
+        if not stream or stream[0][0].value != "(":
+            raise CompileError.at(loc, "expected '(' after '_Pragma'")
+        stream.pop(0)  # '('
+        parts: List[str] = []
+        while stream:
+            tok = stream[0][0]
+            if tok.value == ")":
+                stream.pop(0)
+                if not parts:
+                    raise CompileError.at(loc, "_Pragma requires a string literal operand")
+                return "".join(parts)
+            if tok.kind != TokenKind.STRING:
+                raise CompileError.at(tok.location, "_Pragma operand must be a string literal")
+            parts.append(tok.string or "")
+            stream.pop(0)
+        raise CompileError.at(loc, "unterminated _Pragma operator")
 
     def _retag_token(self, tok: Token, hide: frozenset) -> Token:
         # Hide set is tracked in the stream, not on Token objects for API compatibility.
@@ -1086,50 +1131,103 @@ def _to_int64(value: int) -> int:
     return value
 
 
-def splice_lines(source: str, filename: str) -> List[Tuple[str, int, bool]]:
+@dataclass
+class SpliceSegment:
+    phys_line: int
+    phys_col_start: int  # 1-based column in physical line corresponding to start of this segment in logical text
+    logical_start: int   # 0-based index in logical line text
+
+
+@dataclass
+class LogicalLine:
+    text: str
+    start_phys_line: int
+    segments: List[SpliceSegment]
+
+
+def splice_lines(source: str, filename: str) -> List[LogicalLine]:
     """Perform backslash-newline splicing.
 
-    Returns a list of (logical_line_text, starting_physical_line_number, _).
+    Returns logical lines with segment mapping so token columns can be mapped to
+    physical source locations when a logical line spans multiple physical lines.
     Logical line text does not include the terminating newline.
     """
     source = source.replace("\r\n", "\n").replace("\r", "\n")
     lines = source.split("\n")
-    result: List[Tuple[str, int, bool]] = []
+    result: List[LogicalLine] = []
     i = 0
     phys = 1
     n = len(lines)
     while i < n:
         start_phys = phys
-        parts = [lines[i]]
+        parts: List[str] = []
+        segments: List[SpliceSegment] = []
         cur = i
+        logical_pos = 0
+        # first physical segment
+        first_line = lines[cur]
+        if cur < n and first_line.endswith("\\"):
+            seg_text = first_line[:-1]
+        else:
+            seg_text = first_line
+        parts.append(seg_text)
+        segments.append(SpliceSegment(phys_line=start_phys, phys_col_start=1, logical_start=logical_pos))
+        logical_pos += len(seg_text)
         # splice while line ends with backslash
         while cur < n and lines[cur].endswith("\\"):
-            # remove trailing backslash
-            parts[-1] = lines[cur][:-1]
             cur += 1
             if cur < n:
-                parts.append(lines[cur])
+                next_phys = start_phys + (cur - i)
+                next_line = lines[cur]
+                if next_line.endswith("\\"):
+                    seg_text = next_line[:-1]
+                else:
+                    seg_text = next_line
+                parts.append(seg_text)
+                segments.append(SpliceSegment(phys_line=next_phys, phys_col_start=1, logical_start=logical_pos))
+                logical_pos += len(seg_text)
         logical = "".join(parts)
-        result.append((logical, start_phys, True))
+        result.append(LogicalLine(text=logical, start_phys_line=start_phys, segments=segments))
         consumed = cur - i + 1
         i = cur + 1
         phys = start_phys + consumed
-        # Handle case where source ended without trailing newline: split produced last element.
-    # split('\n') on "a\n" gives ['a',''] so last empty logical line corresponds to trailing newline.
-    # Keep behavior consistent; parser/preprocessor can ignore final empty logical line if desired.
     return result
 
 
-def _lex_fragment(text: str, filename: str, line: int) -> List[Token]:
+def _map_splice_location(segments: Optional[List[SpliceSegment]], logical_col: int, fallback_line: int) -> Tuple[int, int]:
+    """Map a 1-based logical column in a spliced logical line to (physical_line, physical_col)."""
+    if not segments:
+        return fallback_line, logical_col
+    idx = max(logical_col - 1, 0)
+    seg = segments[0]
+    for s in segments:
+        if s.logical_start <= idx:
+            seg = s
+        else:
+            break
+    phys_col = seg.phys_col_start + (idx - seg.logical_start)
+    return seg.phys_line, phys_col
+
+
+def _lex_fragment(text: str, filename: str, line: int,
+                  splice_segments: Optional[List[SpliceSegment]] = None) -> List[Token]:
     if text == "":
         return []
     toks = lex(text, filename)
-    # Drop EOF and relocate to requested logical line.
+    # Drop EOF and relocate to requested logical line. When splice segment mapping
+    # is available, preserve physical line/column across splices for diagnostics.
     out: List[Token] = []
     for t in toks:
         if t.kind == TokenKind.EOF:
             continue
-        out.append(Token(t.kind, t.value, SourceLocation(filename, line, t.location.column),
+        if splice_segments and len(splice_segments) > 1:
+            phys_line, phys_col = _map_splice_location(splice_segments, t.location.column, line)
+            loc = SourceLocation(filename, phys_line, phys_col)
+        else:
+            # For non-spliced lines, keep logical line number provided by caller and
+            # lexical column from the fragment.
+            loc = SourceLocation(filename, line, t.location.column)
+        out.append(Token(t.kind, t.value, loc,
                          number=t.number, string=t.string, leading_space=t.leading_space))
     return out
 

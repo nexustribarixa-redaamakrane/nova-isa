@@ -641,3 +641,110 @@ def test_empty_expression_statement_and_null_for_parts():
 def test_invalid_declarator_error():
     with pytest.raises(CompileError):
         parse_c("int *;")
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 Step 4 hardening: compound literals, _Generic, declarator edges
+# ---------------------------------------------------------------------------
+
+
+def test_compound_literal_as_initializer():
+    tu = parse_c("struct S { int x; }; int main(void) { struct S s = (struct S){1}; return 0; }")
+    fn = tu.declarations[1]
+    assert isinstance(fn, ast.FunctionDefinition)
+    decl = fn.body.items[0]
+    assert isinstance(decl, ast.Declaration)
+    init = decl.init_declarators[0].initializer
+    assert isinstance(init, ast.CompoundLiteral)
+    assert isinstance(init.type_name, ast.TypeName)
+    assert isinstance(init.initializer, ast.InitializerList)
+    assert len(init.initializer.items) == 1
+
+
+def test_compound_literal_member_access_in_expression():
+    expr = _return_expr("return ((struct S){3}).x;")
+    assert isinstance(expr, ast.MemberAccessExpression)
+    assert isinstance(expr.base, ast.CompoundLiteral)
+    assert expr.member == "x"
+
+
+def test_compound_literal_with_designated_initializer():
+    expr = _return_expr("return ((struct S){.x = 4}).x;")
+    assert isinstance(expr, ast.MemberAccessExpression)
+    lit = expr.base
+    assert isinstance(lit, ast.CompoundLiteral)
+    item = lit.initializer.items[0]
+    assert isinstance(item, ast.DesignatedInitializer)
+    assert item.designators[0].field == "x"
+
+
+def test_generic_selection_basic():
+    expr = _return_expr("return _Generic(x, int: 1, default: 0);")
+    assert isinstance(expr, ast.GenericSelection)
+    assert isinstance(expr.controlling, ast.IdentifierExpression)
+    assert len(expr.associations) == 2
+    assert expr.associations[0].type_name is not None
+    assert expr.associations[1].type_name is None
+
+
+def test_generic_selection_multiple_type_associations():
+    expr = _return_expr("return _Generic(x, int: 1, long: 2, default: 0);")
+    assert isinstance(expr, ast.GenericSelection)
+    assert len(expr.associations) == 3
+    assert all(a.type_name is not None for a in expr.associations[:2])
+
+
+@pytest.mark.parametrize(
+    "body,message",
+    [
+        ("return (int){; };", "expected expression"),
+        ("return _Generic(x, int 1);", "expected ':'"),
+        ("return _Generic(x);", "expected ','"),
+    ],
+)
+def test_malformed_compound_literal_and_generic_selection(body, message):
+    with pytest.raises(CompileError) as excinfo:
+        parse_c(f"int main(void) {{ {body} }}")
+    assert message in str(excinfo.value)
+
+
+def test_abstract_declarator_pointer_to_function_in_cast():
+    expr = _return_expr("return (int (*)(int))p != 0;")
+    assert isinstance(expr, ast.BinaryExpression)
+    assert isinstance(expr.left, ast.CastExpression)
+    assert isinstance(expr.left.type_name, ast.TypeName)
+    assert expr.left.type_name.declarator is not None
+
+
+def test_declarator_edge_cases_parse_to_structure():
+    # int (*fp)(int): parenthesized pointer with function suffix
+    dec = _decl_direct("int (*fp)(int);")
+    assert isinstance(dec.direct, ast.FunctionDeclarator)
+    assert isinstance(dec.direct.base, ast.ParenthesizedDeclarator)
+    assert dec.direct.base.inner.pointers
+
+    # int (*pa)[10]: parenthesized pointer with array suffix
+    dec = _decl_direct("int (*pa)[10];")
+    assert isinstance(dec.direct, ast.ArrayDeclarator)
+    assert isinstance(dec.direct.base, ast.ParenthesizedDeclarator)
+    assert dec.direct.base.inner.pointers
+
+
+def test_variable_length_array_syntax():
+    fn = first_func("int main(void) { int n = 3; int a[n]; return 0; }")
+    decl = fn.body.items[1]
+    assert isinstance(decl, ast.Declaration)
+    arr = decl.init_declarators[0].declarator.direct
+    assert isinstance(arr, ast.ArrayDeclarator)
+    assert isinstance(arr.size, ast.IdentifierExpression)
+    assert arr.size.name == "n"
+
+
+def test_flexible_array_member_syntax():
+    decl = first_decl("struct S { int n; int data[]; };")
+    assert isinstance(decl, ast.Declaration)
+    member = decl.specifiers.type_specifiers[0].members[1]
+    fam = member.declarators[0].declarator.direct
+    assert isinstance(fam, ast.ArrayDeclarator)
+    assert fam.size is None
+

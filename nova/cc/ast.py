@@ -311,6 +311,24 @@ class SizeofExpression(Expression):
     operand: Union[Expression, TypeName, None] = None
 
 
+@dataclass
+class CompoundLiteral(Expression):
+    type_name: TypeName = field(default_factory=lambda: TypeName(location=SourceLocation()))
+    initializer: "InitializerList" = field(default_factory=lambda: InitializerList(location=SourceLocation()))
+
+
+@dataclass
+class GenericAssociation(Node):
+    type_name: Optional[TypeName] = None  # None means default
+    expression: Expression = field(default_factory=lambda: IntegerLiteral(location=SourceLocation(), value="0", number=0))
+
+
+@dataclass
+class GenericSelection(Expression):
+    controlling: Expression = field(default_factory=lambda: IntegerLiteral(location=SourceLocation(), value="0", number=0))
+    associations: List[GenericAssociation] = field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Statements
 # ---------------------------------------------------------------------------
