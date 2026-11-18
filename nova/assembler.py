@@ -52,6 +52,7 @@ converges after at most a few passes and a stable image is always produced.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from dataclasses import dataclass, replace
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -86,6 +87,7 @@ __all__ = [
     "assemble_line",
     "assemble_object",
     "assemble_program",
+    "preprocess_source",
     "assemble_statement",
     "assemble_text",
     "parse_csr",
@@ -115,9 +117,14 @@ _MEMORY_RE = re.compile(r"^\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*"
 class AssemblyError(ValueError):
     """Raised for any Nova assembly source error, with its line number."""
 
-    def __init__(self, message: str, line: int | None = None) -> None:
+    def __init__(self, message: str, line: int | None = None,
+                 origin: str | None = None) -> None:
         self.line = line
-        super().__init__(f"line {line}: {message}" if line is not None else message)
+        self.origin = origin
+        text = f"{origin}:{line}: {message}" if origin and line is not None else (
+            f"line {line}: {message}" if line is not None else message
+        )
+        super().__init__(text)
 
 
 # --------------------------------------------------------------------------
@@ -258,6 +265,139 @@ def _split_object_operands(text: str, line_number: int,
     return operands
 
 
+# --------------------------------------------------------------------------
+# Source preprocessing: includes and macros
+# --------------------------------------------------------------------------
+
+_MAX_INCLUDE_DEPTH = 16
+_MAX_MACRO_PASSES = 32
+_MACRO_PARAM_RE = re.compile(r"%([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _expand_includes(source: str, *, source_path: Optional[Path],
+                     include_dirs: Sequence[Path],
+                     depth: int, stack: Tuple[Path, ...]) -> str:
+    if depth > _MAX_INCLUDE_DEPTH:
+        raise AssemblyError(".include nesting is too deep")
+    base = source_path.parent if source_path is not None else Path.cwd()
+    lines: List[str] = []
+    for line_number, raw in enumerate(source.splitlines(), start=1):
+        text = _strip_comment(raw).strip()
+        parts = text.split(None, 1) if text else []
+        if parts and parts[0].lower() == ".include":
+            if len(parts) != 2:
+                raise AssemblyError(".include requires one quoted path", line_number)
+            token = parts[1].strip()
+            if not (token.startswith('"') and token.endswith('"')):
+                raise AssemblyError(".include path must be quoted", line_number)
+            name = token[1:-1]
+            given = Path(name)
+            candidates = ([given] if given.is_absolute()
+                          else [base / name] + [Path(directory) / name
+                                                for directory in include_dirs])
+            found = next((path for path in candidates if path.is_file()), None)
+            if found is None:
+                raise AssemblyError(f".include file {name!r} was not found", line_number)
+            resolved = found.resolve()
+            if resolved in stack:
+                raise AssemblyError(f"recursive .include of {name!r}", line_number)
+            try:
+                child = found.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise AssemblyError(
+                    f".include cannot read {name!r}: {exc.strerror}", line_number
+                ) from exc
+            lines.extend(_expand_includes(
+                child, source_path=found, include_dirs=include_dirs,
+                depth=depth + 1, stack=stack + (resolved,),
+            ).splitlines())
+        else:
+            lines.append(raw)
+    return "\n".join(lines)
+
+
+def _expand_macros(source: str) -> str:
+    macros: Dict[str, Dict[str, object]] = {}
+    lines: List[str] = []
+    name: Optional[str] = None
+    for raw in source.splitlines():
+        text = raw.strip()
+        lowered = text.lower()
+        if name is not None:
+            if lowered == ".endm":
+                name = None
+            else:
+                macros[name]["body"].append(raw)  # type: ignore[union-attr]
+            continue
+        parts = text.split(None, 1)
+        if parts and parts[0].lower() == ".macro":
+            if len(parts) != 2:
+                raise AssemblyError(".macro requires a name and parameter list")
+            tokens = parts[1].replace(",", " ").split()
+            macro_name = tokens[0].lower()
+            if not _LABEL_RE.fullmatch(macro_name):
+                raise AssemblyError(f"invalid macro name {macro_name!r}")
+            params = [token.lstrip("%") for token in tokens[1:]]
+            if len(set(params)) != len(params):
+                raise AssemblyError(f"duplicate macro parameter in {macro_name!r}")
+            macros[macro_name] = {"params": params, "body": []}
+            name = macro_name
+            continue
+        lines.append(raw)
+    if name is not None:
+        raise AssemblyError(f"unterminated .macro {name!r}")
+
+    for _ in range(_MAX_MACRO_PASSES):
+        changed = False
+        result: List[str] = []
+        for raw in lines:
+            parts = raw.strip().split(None, 1)
+            macro_name = parts[0].lower() if parts else ""
+            if macro_name not in macros:
+                result.append(raw)
+                continue
+            macro = macros[macro_name]
+            params = macro["params"]
+            arguments_text = parts[1].strip() if len(parts) == 2 else ""
+            arguments = ([argument.strip() for argument in arguments_text.split(",")]
+                         if arguments_text else [])
+            if len(arguments) != len(params):
+                raise AssemblyError(
+                    f"macro {macro_name!r} expects {len(params)} argument(s)"
+                )
+            mapping = dict(zip(params, arguments))
+            for body_line in macro["body"]:  # type: ignore[union-attr]
+                result.append(
+                    _MACRO_PARAM_RE.sub(
+                        lambda match: mapping.get(match.group(1), match.group(0)),
+                        body_line,
+                    )
+                )
+            changed = True
+        lines = result
+        if not changed:
+            break
+    else:
+        raise AssemblyError("macro expansion did not terminate")
+    return "\n".join(lines)
+
+
+def preprocess_source(source: str, *, source_path: Optional[str | Path] = None,
+                      include_dirs: Iterable[str | Path] = ()) -> str:
+    """Expand ``.include`` files and ``.macro`` definitions deterministically.
+
+    Included lines keep their own line numbering locally; expanded line numbers
+    are reported by later diagnostics. Nesting and expansion are bounded.
+    """
+    if not isinstance(source, str):
+        raise TypeError("Nova assembly source must be a string.")
+    path = Path(source_path) if source_path is not None else None
+    includes = tuple(Path(directory) for directory in include_dirs)
+    expanded = _expand_includes(source, source_path=path, include_dirs=includes,
+                                depth=0, stack=())
+    return _expand_macros(expanded)
+
+
 @dataclass(frozen=True)
 class ParsedStatement:
     """One instruction statement with the labels attached to it.
@@ -287,7 +427,8 @@ class ParsedDirective:
     labels: Tuple[str, ...]
 
 
-def parse_program(source: str) -> Tuple[List[ParsedStatement], List[str]]:
+def parse_program(source: str, *, source_path: Optional[str | Path] = None,
+                  include_dirs: Iterable[str | Path] = ()) -> Tuple[List[ParsedStatement], List[str]]:
     """Split source into statements with their labels, and trailing labels.
 
     Returns ``(entries, trailing)`` where ``entries`` is the list of
@@ -302,7 +443,9 @@ def parse_program(source: str) -> Tuple[List[ParsedStatement], List[str]]:
     trailing: List[str] = []
     seen: Dict[str, int] = {}
     pending: List[str] = []
-    for line_number, raw in enumerate(source.splitlines(), start=1):
+    for line_number, raw in enumerate(preprocess_source(
+            source, source_path=source_path,
+            include_dirs=include_dirs).splitlines(), start=1):
         line = _strip_comment(raw).strip()
         if not line:
             continue
@@ -327,12 +470,14 @@ def parse_program(source: str) -> Tuple[List[ParsedStatement], List[str]]:
     return entries, trailing
 
 
-def parse_source(source: str) -> Tuple[List[Tuple[int, str]], Dict[str, int]]:
+def parse_source(source: str, *, source_path: Optional[str | Path] = None,
+                 include_dirs: Iterable[str | Path] = ()) -> Tuple[List[Tuple[int, str]], Dict[str, int]]:
     """Split source into instruction lines and a label table.
 
     Labels map to the byte offset of the next instruction within the image.
     """
-    entries, trailing = parse_program(source)
+    entries, trailing = parse_program(source, source_path=source_path,
+                                      include_dirs=include_dirs)
     statements: List[Tuple[int, str]] = [
         (entry.line_number, entry.text) for entry in entries
     ]
@@ -414,7 +559,9 @@ _DEBUG_DIRECTIVES = frozenset(
 
 
 def _parse_object_entries(
-        source: str) -> Tuple[Sequence[object], List[str], List[str], Dict[str, Dict[str, object]]]:
+        source: str, *, source_path: Optional[str | Path] = None,
+        include_dirs: Iterable[str | Path] = ()
+) -> Tuple[Sequence[object], List[str], List[str], Dict[str, Dict[str, object]]]:
     """Parse object-frontend source into instruction/directive entries.
 
     Returns ``(entries, globals_order, trailing, symbol_meta)`` where ``entries`` is a list
@@ -434,7 +581,9 @@ def _parse_object_entries(
     seen: Dict[str, int] = {}
     pending: List[str] = []
     symbol_meta: Dict[str, Dict[str, object]] = {}
-    for line_number, raw in enumerate(source.splitlines(), start=1):
+    for line_number, raw in enumerate(preprocess_source(
+            source, source_path=source_path,
+            include_dirs=include_dirs).splitlines(), start=1):
         line = _strip_comment(raw).strip()
         if not line:
             continue
@@ -735,7 +884,9 @@ def _layout_labels(entries: Sequence[ParsedStatement], trailing: Sequence[str],
     return labels
 
 
-def assemble_text(source: str, *, entry: int = 0) -> bytes:
+def assemble_text(source: str, *, entry: int = 0,
+                  source_path: Optional[str | Path] = None,
+                  include_dirs: Iterable[str | Path] = ()) -> bytes:
     """Assemble Nova assembly source into a raw little-endian instruction image.
 
     ``entry`` is the address the image is linked at (the load address). Branch
@@ -750,7 +901,8 @@ def assemble_text(source: str, *, entry: int = 0) -> bytes:
     """
     from .pseudo import expand_pseudo  # local import avoids an import cycle
 
-    entries, trailing = parse_program(source)
+    entries, trailing = parse_program(source, source_path=source_path,
+                                      include_dirs=include_dirs)
     count = len(entries)
     lengths = [1] * count
     expansions: List[List[str]] | None = None
@@ -836,7 +988,8 @@ def _data_integer_bytes(width: int, token: str, line_number: int,
     return (value & ((1 << bits) - 1)).to_bytes(width, "little")
 
 
-def assemble_object(source: str) -> ObjectFile:
+def assemble_object(source: str, *, source_path: Optional[str | Path] = None,
+                    include_dirs: Iterable[str | Path] = ()) -> ObjectFile:
     """Assemble Nova assembly source into a relocatable ``.nobj`` object.
 
     The layout is produced at section-relative address 0, so no final load
@@ -862,7 +1015,9 @@ def assemble_object(source: str) -> ObjectFile:
     """
     from .pseudo import MAX_LI_LENGTH, expand_pseudo, li_maximal  # local import avoids a cycle
 
-    entries, globals_order, trailing, symbol_meta = _parse_object_entries(source)
+    entries, globals_order, trailing, symbol_meta = _parse_object_entries(
+        source, source_path=source_path, include_dirs=include_dirs
+    )
     global_set: set[str] = set(globals_order)
 
     # Section order: .text is always section 0; other sections follow in

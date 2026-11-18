@@ -11,6 +11,7 @@ from .assembler import (
     assemble_program,
     assemble_text,
     parse_source,
+    preprocess_source,
 )
 from .disassembler import (
     DisassemblyError,
@@ -128,6 +129,7 @@ TRAP_ABI_VERSION = "Nova ABI v1.0"
 __all__ = [
     # tools
     "assemble_text",
+    "preprocess_source",
     "assemble_program",
     "assemble_line",
     "assemble_object",

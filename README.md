@@ -403,7 +403,7 @@ Error codes in `a1` are `1` bad argument, `2` unsupported, `3` not found, and `4
 
 ## 16. Assembly language and tools
 
-Source is case-insensitive for mnemonics, register names, and CSR names. A semicolon starts a comment. Labels use letters, digits, `_`, `.`, or `$` and may share a line with an instruction. Immediates accept decimal, `0x`, `0b`, and `0o` literals with optional `_` separators and an optional `#` or `$` prefix. Memory operands are `[rN]`, `[rN + disp]`, or `[rN - disp]`. A branch or call target is a label or a signed byte displacement relative to that instruction. Directives are not defined by this revision and are rejected explicitly. The one exception is the pair of linking directives `.global` and `.globl`, accepted only when the assembler is building a relocatable object for a `.nobj` output name, where they mark the named symbol as global. Every malformed input raises `nova.AssemblyError` carrying the source line number, and no operand is ever silently substituted or truncated.
+Source is case-insensitive for mnemonics, register names, and CSR names. A semicolon starts a comment. Labels use letters, digits, `_`, `.`, or `$` and may share a line with an instruction. Immediates accept decimal, `0x`, `0b`, and `0o` literals with optional `_` separators and an optional `#` or `$` prefix. Memory operands are `[rN]`, `[rN + disp]`, or `[rN - disp]`. A branch or call target is a label or a signed byte displacement relative to that instruction. The assembler accepts the linking directives `.global`/`.globl`, the section selector `.section`, the data directives `.byte`/`.hword`/`.word`/`.quad`/`.asciz`/`.space`/`.align`, the symbol metadata directives `.type`/`.size`, the debug directives `.file`/`.loc`/`.cfi_*`, and the source directives `.include`/`.macro`/`.endm`. Unknown directives are rejected explicitly. `nova.preprocess_source()` expands includes and macros deterministically before parsing; `.include` paths are resolved relative to the including file or an explicit include directory, nesting is bounded, and recursive includes are errors. A macro is declared with `.macro name p1, p2` and ended with `.endm`; `%p1`-style parameters are substituted at each invocation, and expansion is bounded. Every malformed input raises `nova.AssemblyError` carrying the source line number, and no operand is ever silently substituted or truncated.
 
 ```asm
 MOVI r1, 100
@@ -429,6 +429,7 @@ less: RET
 | `assemble_text(source, entry=0)` | Assemble source into a raw little-endian image |
 | `assemble_program(lines, entry=0)` | Assemble an iterable of source lines |
 | `assemble_line(text, pc)` | Assemble one instruction for a known address |
+| `preprocess_source(source, source_path=..., include_dirs=...)` | Expand `.include` files and `.macro` definitions |
 | `disassemble_word(word)` | Canonical text for one 32-bit word |
 | `disassemble_bytes(data)` | Canonical text per word of an image |
 | `disassemble_words(words)` | Decoded instructions, with `None` for undefined words |
