@@ -358,7 +358,7 @@ not start Milestone 6 automatically without explicit direction.
   `void` object. Both are regression-tested.
 - **Tests:** `tests/test_cc_codegen.py` (55 tests) covers structural validation,
   target/semantic gates, allowed directives/pseudos/registers, frame layout,
-  relocation kinds, object round-tripping, 20 end-to-end programs assembled,
+  relocation kinds, object round-tripping, 21 end-to-end programs assembled,
   linked, and executed in the emulator, and source-located unsupported
   diagnostics. Frontend counts: lexer/preprocessor 105, parser 69, sema 81.
   Full suite 2147 passed; `compileall` clean; conformance 18/18.
