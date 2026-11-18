@@ -28,11 +28,11 @@ _FORMATS = (
     FileFormat(".nol", "Nova Listing", "text", "Addressed assembly/disassembly listing."),
     FileFormat(".inok", "Intermediate Nova Kompile", "intermediate", "Versioned compiler intermediate representation.", b"NOVIR\x00\x01\x00"),
     FileFormat(".noo", "Nova Object", "object", "Reserved name for a relocatable Nova object; the implemented object format is `.nobj`."),
-    FileFormat(".nobj", "Nova Object Format", "object", "Relocatable Nova object v1: named sections (.text/.data/.rodata/.bss), a symbol table (local, global, and undefined external), and PCREL_DISP14 relocations for branch/call sites. Written by `nova-as -o file.nobj`; read by `nova.load_object`.", b"NOBJ", implemented=True),
+    FileFormat(".nobj", "Nova Object Format", "object", "Relocatable Nova object v2 (v1 still readable): named sections, symbols with type and size, and PCREL_DISP14/LA64/ABS64 relocations. Written by `nova-as -o file.nobj`; read by `nova.load_object`.", b"NOBJ", implemented=True),
     FileFormat(".nok", "Nova Kompile", "executable", "Linked Nova executable container.", b"NOVAKMP\x00"),
     FileFormat(".nob", "Nova Binary", "executable", "Nova executable container v1: 32-byte header (magic, version, flags, image_base, entry, image_size) followed by a little-endian word image. Written by nova-as; read by nova-objdump and nova-run.", b"NOBV", implemented=True),
     FileFormat(".nod", "Nova Dynamic Library", "shared-library", "Loadable Nova module; not a native PE/COFF DLL.", b"NOVADLL\x00"),
-    FileFormat(".nox", "Nova Debug", "debug", "Debug symbols and source/address mapping.", b"NOVADBG\x00"),
+    FileFormat(".nox", "Nova Debug", "debug", "Nova debug container v1: source files, address-to-line mappings, and call-frame records. Encoded by nova.nox.encode_debug.", b"NOVADBG\x00", implemented=True),
     FileFormat(".nom", "Nova Module Manifest", "metadata", "Module metadata and declared imports/exports.", b"NOVAMOD\x00"),
     FileFormat(".nop", "Nova Package", "package", "Distribution archive containing Nova modules and metadata.", b"NOVAPKG\x00"),
 )

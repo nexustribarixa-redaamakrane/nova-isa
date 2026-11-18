@@ -272,6 +272,9 @@ class ObjectFile:
     sections: Sequence[Section] = ()
     symbols: Sequence[Symbol] = ()
     relocations: Sequence[Relocation] = ()
+    #: Optional debug records. They live in a separate .nox container, not in
+    #: the .nobj byte stream, so this field does not affect object encoding.
+    debug: object = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sections", tuple(self.sections))

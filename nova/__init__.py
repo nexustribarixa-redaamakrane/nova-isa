@@ -20,7 +20,16 @@ from .disassembler import (
     disassemble_words,
 )
 from .emulator import HANDLERS, NovaCluster, NovaMachine
-from . import objfmt, syscalls
+from .nox import (
+    DebugInfo,
+    FrameDescription,
+    RegisterSave,
+    SourceFile,
+    SourceLocation,
+    decode_debug,
+    encode_debug,
+)
+from . import nox, objfmt, syscalls
 from .isa import (
     ALIASES,
     CSR_BY_NAME,
@@ -165,6 +174,14 @@ __all__ = [
     # object identities, syscalls, and conformance
     "objfmt",
     "syscalls",
+    "nox",
+    "DebugInfo",
+    "FrameDescription",
+    "RegisterSave",
+    "SourceFile",
+    "SourceLocation",
+    "decode_debug",
+    "encode_debug",
     "CONFORMANCE_VERSION",
     "CONFORMANCE_VECTORS",
     "run_conformance_suite",

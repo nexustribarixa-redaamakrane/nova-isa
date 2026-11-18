@@ -525,7 +525,7 @@ These suffixes are registered format names, published as `nova.FILE_FORMATS`; `n
 | `.nok` | Nova Kompile | Linked Nova executable container | Magic bytes reserved; no executable loader |
 | `.nob` | Nova Binary | Nova executable container v1: 32-byte header (magic `NOBV`, version, flags, image base, entry, image size) followed by a little-endian word image | Written by `nova-as`; read by `nova-objdump` and `nova-run` |
 | `.nod` | Nova Dynamic Library | Loadable Nova module | Magic bytes reserved; no module ABI or loader |
-| `.nox` | Nova Debug | Debug symbols and source mapping | Magic bytes reserved; no debug writer |
+| `.nox` | Nova Debug | Debug symbols and source mapping | Version 1 container written by `nova.nox.encode_debug`; emitted from `.file`/`.loc`/`.cfi_*` directives |
 | `.nom` | Nova Module Manifest | Imports, exports, and module metadata | Magic bytes reserved; no manifest parser |
 | `.nop` | Nova Package | Distribution package of Nova artifacts | Magic bytes reserved; no package manager |
 
@@ -553,6 +553,36 @@ These suffixes are registered format names, published as `nova.FILE_FORMATS`; `n
 ### 17.3 User module directories
 
 The library resolves default module search and install locations dynamically from the current user's home directory, under `Documents/OpenWindows` and `Documents/OpenWindows-Essentials`. They can be overridden independently with `NOVA_OPENWINDOWS_DIR` and `NOVA_OPENWINDOWS_ESSENTIALS_DIR`. Calling `nova.openwindows_directories()` only resolves and returns paths; it does not create directories or write files. No user-specific absolute path is stored in this repository or embedded in a Nova artifact.
+
+### 17.4 Debug information (.nox) v1
+
+`nova-as` records compiler-facing debug metadata from `.file`, `.loc`,
+`.cfi_startproc`, `.cfi_offset`, and `.cfi_endproc` directives into an
+`ObjectFile.debug` record. `nova.nox.encode_debug()` / `decode_debug()` serialize
+that metadata into a `.nox` container; it is not embedded in the `.nobj` byte
+stream. The container is little-endian and deterministic:
+
+| Field | Encoding | Meaning |
+| --- | --- | --- |
+| Magic | 8 bytes, `NOVADBG\x00` | Identifies the container |
+| Version | 2-byte little-endian unsigned | Format version, currently 1 |
+| Flags | 2-byte little-endian unsigned | Must be zero |
+| Body size | 4-byte little-endian unsigned | Byte count of the record area |
+| Unit count | 4-byte little-endian unsigned | Reserved, currently zero |
+| Reserved | 4 bytes | Must be zero |
+| Records | `u8 kind` + `u32 size` + payload | Sorted by kind and key |
+
+Record kinds are `1` source file (`u32 index` + UTF-8 path), `2` source location
+(`u64 section offset`, `u32 file`, `u32 line`, `u32 column`), `3` call frame
+(`u64 start`, `u64 end`, `u32 CFA register`, `i32 CFA offset` + UTF-8 function
+name), and `4` register save (`u64 instruction offset`, `u32 register`,
+`i32 offset from CFA`). All offsets are section-relative byte offsets in
+`.text` — Nova's `.loc` carries an explicit offset because pseudo-instruction
+expansion changes instruction addresses. The assembler rejects a `.loc` that
+names an undeclared file or an offset beyond the emitted text. The decoder
+rejects malformed, duplicated, or unordered records by requiring that
+re-encoding produce the original bytes. This format is intentionally not
+DWARF; it is the host-independent contract a future DWARF bridge can map to.
 
 ## 18. Architecture conformance
 

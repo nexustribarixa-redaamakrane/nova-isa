@@ -69,6 +69,13 @@ from .isa import (
     WORD_MASK,
     zero_extend,
 )
+from .nox import (
+    DebugInfo,
+    FrameDescription,
+    RegisterSave,
+    SourceFile,
+    SourceLocation,
+)
 from .object import ObjectFile, Relocation, Section, Symbol, SYMBOL_TYPE_BY_NAME
 
 __all__ = [
@@ -401,6 +408,11 @@ def _asciz_bytes(token: str, line_number: int) -> bytes:
     return bytes(out)
 
 
+_DEBUG_DIRECTIVES = frozenset(
+    {".file", ".loc", ".cfi_startproc", ".cfi_endproc", ".cfi_offset"}
+)
+
+
 def _parse_object_entries(
         source: str) -> Tuple[Sequence[object], List[str], List[str], Dict[str, Dict[str, object]]]:
     """Parse object-frontend source into instruction/directive entries.
@@ -473,6 +485,22 @@ def _parse_object_entries(
                 known = ", ".join(sorted(_SECTION_DEFAULTS))
                 raise AssemblyError(
                     f".section operand must be one of {known}", line_number
+                )
+            entries.append(
+                ParsedDirective(line_number, directive, tuple(operands), ())
+            )
+            continue
+        if directive in _DEBUG_DIRECTIVES:
+            # Debug directives do not consume labels: a label may precede a
+            # .loc so the metadata can describe the following instruction.
+            operands = _split_object_operands(rest, line_number)
+            if directive == ".cfi_endproc" and operands:
+                raise AssemblyError(
+                    ".cfi_endproc takes no operands", line_number
+                )
+            if directive != ".cfi_endproc" and not operands:
+                raise AssemblyError(
+                    f"{directive} requires operands", line_number
                 )
             entries.append(
                 ParsedDirective(line_number, directive, tuple(operands), ())
@@ -907,7 +935,26 @@ def assemble_object(source: str) -> ObjectFile:
     offset = [0] * len(section_names)
     symbol_rows: List[Tuple[str, int, int]] = []
     abs64_rows: List[Tuple[int, int, str]] = []
+    debug_files: List[SourceFile] = []
+    debug_locations: List[SourceLocation] = []
+    debug_frames: List[FrameDescription] = []
+    debug_saves: List[RegisterSave] = []
     defined_names: set[str] = set()
+
+    def debug_int(token: str, line: int, what: str) -> int:
+        try:
+            value = parse_integer(token, line)
+        except AssemblyError:
+            raise AssemblyError(f"{what} must be an integer", line) from None
+        if value < 0:
+            raise AssemblyError(f"{what} cannot be negative", line)
+        return value
+
+    def debug_signed(token: str, line: int, what: str) -> int:
+        try:
+            return parse_integer(token, line)
+        except AssemblyError:
+            raise AssemblyError(f"{what} must be an integer", line) from None
 
     def record_symbol(name: str, sec: int, value: int) -> None:
         if name not in defined_names:
@@ -931,6 +978,54 @@ def assemble_object(source: str) -> ObjectFile:
             continue
         directive = entry.directive
         if directive == ".section":
+            continue
+        if directive in _DEBUG_DIRECTIVES:
+            operands = entry.operands
+            if directive == ".file":
+                if len(operands) != 2:
+                    raise AssemblyError(".file expects index and path",
+                                        entry.line_number)
+                path = operands[1]
+                if not (path.startswith('"') and path.endswith('"')):
+                    raise AssemblyError(".file path must be quoted",
+                                        entry.line_number)
+                debug_files.append(SourceFile(
+                    index=debug_int(operands[0], entry.line_number, "file index"),
+                    path=path[1:-1],
+                ))
+            elif directive == ".loc":
+                if len(operands) != 3:
+                    raise AssemblyError(".loc expects file, line and offset",
+                                        entry.line_number)
+                debug_locations.append(SourceLocation(
+                    file=debug_int(operands[0], entry.line_number, "file index"),
+                    line=debug_int(operands[1], entry.line_number, "line"),
+                    offset=debug_int(operands[2], entry.line_number, "offset"),
+                ))
+            elif directive == ".cfi_startproc":
+                if len(operands) != 5:
+                    raise AssemblyError(
+                        ".cfi_startproc expects name, start, end, cfa register and offset",
+                        entry.line_number,
+                    )
+                debug_frames.append(FrameDescription(
+                    name=operands[0],
+                    start=debug_int(operands[1], entry.line_number, "start"),
+                    end=debug_int(operands[2], entry.line_number, "end"),
+                    cfa_register=debug_int(operands[3], entry.line_number, "register"),
+                    cfa_offset=debug_signed(operands[4], entry.line_number, "offset"),
+                ))
+            elif directive == ".cfi_offset":
+                if len(operands) != 3:
+                    raise AssemblyError(
+                        ".cfi_offset expects address, register and offset",
+                        entry.line_number,
+                    )
+                debug_saves.append(RegisterSave(
+                    offset=debug_int(operands[0], entry.line_number, "address"),
+                    register=debug_int(operands[1], entry.line_number, "register"),
+                    save_offset=debug_signed(operands[2], entry.line_number, "offset"),
+                ))
             continue
         if sec == 0:
             raise AssemblyError(
@@ -1099,8 +1194,30 @@ def assemble_object(source: str) -> ObjectFile:
                 alignment=section_alignment[sec],
                 data=bytes(section_data[sec]),
             ))
+    debug = DebugInfo(
+        files=tuple(debug_files), locations=tuple(debug_locations),
+        frames=tuple(debug_frames), register_saves=tuple(debug_saves),
+    )
+    known_files = {item.index for item in debug.files}
+    for location in debug.locations:
+        if location.file not in known_files:
+            raise AssemblyError(
+                f".loc refers to undeclared file index {location.file}"
+            )
+        if location.offset > offset[0]:
+            raise AssemblyError(
+                f".loc offset {location.offset} is beyond the .text section"
+            )
+    for frame in debug.frames:
+        if frame.end > offset[0]:
+            raise AssemblyError(
+                f".cfi_startproc for {frame.name!r} ends beyond the .text section"
+            )
+
     return ObjectFile(sections=tuple(sections), symbols=symbols,
-                      relocations=relocations)
+                      relocations=relocations,
+                      debug=debug if any((debug_files, debug_locations,
+                                          debug_frames, debug_saves)) else None)
 
 
 def words_to_bytes(words: Sequence[int]) -> bytes:
