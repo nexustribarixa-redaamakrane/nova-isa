@@ -74,6 +74,7 @@ def test_toolchain_version_matches_pyproject():
     assert TOOLCHAIN_VERSION == pyproject["project"]["version"]
     scripts = pyproject["project"]["scripts"]
     assert scripts == {
+        "nova-cc": "nova.cli:compile_main",
         "nova-as": "nova.cli:assemble_main",
         "nova-ld": "nova.cli:link_main",
         "nova-objdump": "nova.cli:objdump_main",

@@ -1,11 +1,10 @@
-"""``python -m nova.cc`` entry point (Phase 1 skeleton)."""
+"""Module entry point for ``python -m nova.cc``."""
 
 from __future__ import annotations
 
+import sys
 
-def main(argv=None) -> int:
-    raise SystemExit("nova-cc driver is not implemented yet")
-
+from .driver import main
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

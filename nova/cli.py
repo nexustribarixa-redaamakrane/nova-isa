@@ -15,7 +15,7 @@ from __future__ import annotations
 import importlib
 from typing import Optional, Sequence
 
-__all__ = ["assemble_main", "link_main", "objdump_main", "run_main"]
+__all__ = ["assemble_main", "compile_main", "link_main", "objdump_main", "run_main"]
 
 
 def _invoke(module: str, argv: Optional[Sequence[str]]) -> int:
@@ -41,3 +41,10 @@ def objdump_main(argv: Optional[Sequence[str]] = None) -> int:
 def run_main(argv: Optional[Sequence[str]] = None) -> int:
     """Entry point for the ``nova-run`` console script."""
     return _invoke("run", argv)
+
+
+def compile_main(argv: Optional[Sequence[str]] = None) -> int:
+    """Entry point for the ``nova-cc`` console script."""
+    from .cc.driver import main as cc_main
+
+    return cc_main(argv)
