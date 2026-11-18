@@ -455,7 +455,7 @@ Installing this package (`pip install -e .`) exposes four console scripts:
 | `nova-objdump` | Print a `.nob` header and disassemble its image |
 | `nova-run` | Load and execute a `.nob` on the reference emulator |
 
-Each tool is also reachable as `python -m nova.as`, `python -m nova.ld`, `python -m nova.objdump`, and `python -m nova.run`; the console scripts and the module invocations run the identical implementation. Run any tool with `--help` for options and `--version` for the toolchain and ISA versions.
+Each tool is also reachable as `python -m nova.as`, `python -m nova.ld`, `python -m nova.objdump`, and `python -m nova.run`; the console scripts and the module invocations run the identical implementation. Run any tool with `--help` for options and `--version` for the toolchain and ISA versions. If a console script reports an older version than this repository, an older non-editable install is shadowing it; reinstall with `python -m pip install -e .` from this directory.
 
 A smoke session on `hello.no` (containing `MOVI r1, 42` and `HALT`):
 
@@ -562,7 +562,7 @@ The vectors cover integer and unsigned arithmetic, flags, shifts and rotates, lo
 
 ## 19. Scope boundaries
 
-The base ISA intentionally does not define floating-point, vector/SIMD, debug, trace, or power-management instructions; these are reserved for future extensions and are not "incomplete" features of v1.0. Likewise, the repository does not define a compiler, an operating system, a dynamic loader, or any processor product. The static linker is `nova-ld` (Nova Linker v0.1) and is deliberately minimal, not a general-purpose link editor or a compiler; this repository is not a compiler. `docs/COMPILER_BACKEND.md` is the concrete LLVM/GCC backend porting plan for a future C compiler.
+The base ISA intentionally does not define floating-point, vector/SIMD, debug, trace, or power-management instructions; these are reserved for future extensions and are not "incomplete" features of v1.0. Likewise, the repository does not define a compiler, an operating system, a dynamic loader, or any processor product. The static linker is `nova-ld` (Nova Linker v0.1) and is deliberately minimal, not a general-purpose link editor or a compiler; this repository is not a compiler. `docs/COMPILER_BACKEND.md` is the concrete LLVM/GCC backend porting plan for a future C compiler, and `docs/PORTING_READINESS.md` audits whether the current codebase is ready for a compiler, a Nova64 kernel, an OpenWindows port, or hardware.
 
 The reference emulator is architectural: it models registers, the program counter, CSR state, exception and interrupt state, virtual memory as specified, atomics, the capability table, and the defined MMU behavior. It does not simulate pipelines, caches, branch predictors, or other microarchitecture. Passing its tests demonstrates conformance of the model to this specification; it is not evidence of a hardware implementation. New or changed instruction definitions must update `nova/isa.py`, the emulator handler table, this document's generated blocks, and the tests together.
 
