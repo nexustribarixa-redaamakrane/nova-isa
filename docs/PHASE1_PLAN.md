@@ -6,19 +6,23 @@ the compiler is built. It is kept in sync with `docs/PORTING_READINESS.md`.
 
 The ISA remains frozen at `Nova ISA v1.0`. Phase 1 adds software only.
 
-**Current progress:** Steps 1–3 are complete (lexer/diagnostics, hardened
-preprocessor, and parser/AST with tests). Next milestone: Step 4 — type system
-and semantic analysis.
+**Current progress:** Milestones 1–4 are complete (foundation, preprocessor,
+parser/AST, and type system + semantic analysis). Milestones 5–7 (Nova64 code
+generation, compiler driver/toolchain integration, runtime/libnova/validation)
+remain pending. **Phase 2 is not authorized until all seven milestones are
+complete, tested, documented, and committed.** Subtasks are internal stages and
+must not become additional major milestones.
 
 ## 1. Pipeline
 
 ```
 C source
   -> preprocessor          nova/cc/preprocessor.py   (#include, #define, #if...)
-  -> lexer                 nova/cc/lexer.py          (tokens + source locations)
-  -> parser                nova/cc/parser.py         (typed AST shapes)
-  -> semantic analysis     nova/cc/sema.py           (types, scopes, conversions)
-  -> code generation       nova/cc/codegen.py        (Nova assembly text)
+  -> tokens                nova/cc/lexer.py          (tokens + source locations)
+  -> parser                nova/cc/parser.py         (syntax-level AST)
+  -> semantic analysis     nova/cc/sema.py           (types, scopes, checks)
+  -> annotated AST         nova/cc/types.py          (LP64 Nova64 type model)
+  -> code generation       nova/cc/codegen.py        [Milestone 5 — pending]
   -> assembler             nova.assembler            (.nobj, .nox metadata)
   -> linker                nova.link                 (.nob executable)
   -> emulator              nova-run                  (execution)
@@ -26,8 +30,9 @@ C source
 
 The compiler is written in Python for the same reason the assembler and linker
 are: it must be inspectable, testable, and changeable while the architecture is
-young. It emits **real Nova assembly** and goes through the existing tools; it
-does not contain a second binary encoder.
+young. The intended final product emits **real Nova assembly** and goes through
+the existing tools; it does not contain a second binary encoder. No code
+generation exists yet in this tree.
 
 ### Why direct lowering instead of a separate SSA IR
 
@@ -41,71 +46,78 @@ builder would use.
 
 ## 2. Module layout
 
-| Module | Responsibility |
-| --- | --- |
-| `nova/cc/diagnostics.py` | Source locations, diagnostics, `CompileError` |
-| `nova/cc/preprocessor.py` | Line splicing, comments, includes, macros, conditionals |
-| `nova/cc/lexer.py` | C tokens, literals, escapes, keyword classification |
-| `nova/cc/ast.py` | AST node classes |
-| `nova/cc/types.py` | LP64 C types, sizes, alignment, struct layout, conversions |
-| `nova/cc/parser.py` | Recursive-descent parser with C declarator precedence |
-| `nova/cc/sema.py` | Scopes, symbols, type checking, implicit conversions |
-| `nova/cc/codegen.py` | Nova64 assembly emission, frames, calls, ABI |
-| `nova/cc/driver.py` | End-to-end compile pipeline and file handling |
-| `nova/cc/__main__.py` | `python -m nova.cc` |
+| Module | Responsibility | Status |
+| --- | --- | --- |
+| `nova/cc/diagnostics.py` | Source locations, diagnostics, `CompileError` | Implemented |
+| `nova/cc/preprocessor.py` | Line splicing, includes, macros, conditionals, `_Pragma` | Implemented/hardened |
+| `nova/cc/lexer.py` | C tokens, literals, escapes, keyword classification | Implemented |
+| `nova/cc/ast.py` | Syntax-level AST nodes | Implemented |
+| `nova/cc/types.py` | LP64 C types, layout, equality, conversions | Implemented (Milestone 4) |
+| `nova/cc/parser.py` | Recursive-descent parser with C declarator precedence | Implemented/hardened |
+| `nova/cc/sema.py` | Scopes, symbols, type checking, AST annotations | Implemented (Milestone 4) |
+| `nova/cc/codegen.py` | Nova64 assembly emission, frames, calls, ABI | Pending (Milestone 5) |
+| `nova/cc/driver.py` | End-to-end compile pipeline and file handling | Pending (Milestone 6) |
+| `nova/cc/__main__.py` | `python -m nova.cc` | Pending (Milestone 6) |
 
-`nova/cli.py` gains `compile_main`, exposed as the `nova-cc` console script.
+`nova/cli.py` gains `compile_main`, exposed as the `nova-cc` console script, in
+Milestone 6.
 
-## 3. Supported C subset (Phase 1 target)
+## 3. Supported C subset (frontend status)
 
-This is the subset the compiler is expected to accept when Phase 1 is complete.
-Anything not listed must produce a diagnostic, not silently miscompile.
+This is the subset the frontend accepts today. Anything not listed must produce
+a diagnostic, not be silently miscompiled. Code generation support is a separate
+question: no Nova64 lowering exists yet.
 
 ### Types
 
-- `void`
-- `_Bool`
-- `char` (unsigned by ABI), `signed char`, `unsigned char`
-- `short`, `unsigned short`, `short int`, `unsigned short int`
-- `int`, `unsigned int`, `signed`, `unsigned`
-- `long`, `unsigned long`, `long long`, `unsigned long long`
-- pointers, including pointers to functions and pointers to pointers
-- arrays of any supported element type, including multidimensional arrays
-- structures and unions with scalar, pointer, array, struct and union members
-- enumerations (represented as `int`)
-- `typedef` names
-- `const` and `volatile` are accepted as qualifiers and ignored for code
-  generation, because the base ISA has no memory-protection qualifier semantics
-  beyond the MMU
-
-Not supported in Phase 1: `float`, `double`, `long double`, bit-fields,
-`restrict`, `_Atomic`, `_Complex`, `_Generic`, VLA, `inline`, `_Noreturn`.
-`float`/`double` receive a clear "no base-ISA floating point" diagnostic.
+- `void`, `_Bool`.
+- `char` (unsigned by ABI), `signed char`, `unsigned char`.
+- `short`/`unsigned short`, `int`/`unsigned int`, `long`/`unsigned long`,
+  `long long`/`unsigned long long` with target-specific ranks and alignment.
+- `float`, `double`, `long double` have a **semantic representation only**
+  (`lowering_supported = False`). Floating constants are rejected by the lexer
+  and no FP ABI lowering is claimed.
+- Pointers, arrays (including multidimensional, VLA syntax and flexible array
+  members), functions, and nested derived types. Pointer-to-array,
+  array-of-pointer, pointer-to-function and function-returning-pointer remain
+  distinct in the type model.
+- Structures and unions with scalar, pointer, array, struct and union members;
+  bit-field syntax is accepted with a deliberate simplified provisional layout.
+- Enumerations with integer constant values and overflow checks against the
+  Nova64 `int` model.
+- `typedef` names are true aliases, not new independent types.
+- `const`, `volatile`, `restrict` are represented as qualifiers. `_Atomic` is
+  represented but has no lowering.
 
 ### Expressions
 
 Integer and character constants; string literals; identifiers; `sizeof`
-(expression and type); unary `+ - ! ~ * & ++ --`; casts; `* / %`; `+ -`;
-`<< >>`; `< <= > >=`; `== !=`; `& ^ |`; `&& ||`; `?:`; assignment
-`= += -= *= /= %= <<= >>= &= ^= |=`; comma; function calls; array subscript;
-member access `.` and `->`; postfix `++ --`; pointer arithmetic; address of
-functions and objects.
+(expression and type-name forms); unary `+ - ! ~ * & ++ --`; casts and compound
+literals; `_Generic` selections; `* / %`; `+ -`; `<< >>`; `< <= > >=`; `== !=`;
+`& ^ |`; `&& ||`; `?:`; all assignment operators; comma; function calls; array
+subscript; `.`/`->` member access; pointer arithmetic and comparisons.
+
+Array-to-pointer and function-to-pointer decay, lvalue/modifiable-lvalue checks,
+integer promotions, usual arithmetic conversions, and function-call argument
+checks are applied during semantic analysis.
 
 ### Statements
 
-Compound statements; declarations anywhere a statement is allowed; expression
-statements; `if`/`else`; `while`; `do`/`while`; `for`; `break`; `continue`;
-`return`; `switch`/`case`/`default`; empty statement.
+Compound statements; declarations in blocks; expression and null statements;
+`if`/`else`; `while`; `do`/`while`; `for`; `break`; `continue`; `return`;
+`switch`/`case`/`default`; `goto` and labels.
 
 ### Functions and program structure
 
-Function declarations and definitions; prototypes; `void` parameter lists;
-variadic declarations (`...`) are parsed, and `stdarg.h` is provided, but
-variadic *calls* are limited to the integer rules of the ABI; recursion;
-multiple translation units; global variables with constant initializers;
-`static` and `extern` storage classes; `main` returning `int`.
+Function declarations/definitions, prototypes, `void` parameter lists, variadic
+declarations, recursion, file/function/block/prototype scopes, tag namespaces,
+and `extern`/`static` storage classes are handled at the syntax/semantic level.
+K&R old-style definitions are intentionally not a target.
 
-## 4. Nova64 code-generation contract
+## 4. Nova64 code-generation contract (Milestone 5)
+
+The eventual lowering pass must obey the following; none of it is implemented
+by the current frontend.
 
 - Results are computed in `a0`; `a0` is also the return-value register.
 - `t0`-`t3` and `a0`-`a5` are caller-saved scratch within a function.
@@ -137,139 +149,120 @@ multiple translation units; global variables with constant initializers;
 | crt0 | `_start` that calls `main`, then `HALT` (exit code left in `a0`) |
 
 Compiler-generated code never assumes a hosted operating system. The only
-operating-system interface is the existing standard syscall table.
+operating-system interface is the existing standard syscall table. None of this
+runtime layer is implemented yet.
 
-## 6. Implementation order and gates
+## 6. Seven-milestone Phase 1 roadmap and gates
 
-| Step | Deliverable | Gate | Status |
+There are exactly **seven** major Phase 1 milestones. Internal implementation
+stages and subtasks do not count as additional milestones.
+
+| # | Milestone | Gate | Status |
 | --- | --- | --- | --- |
-| 1 | Architecture plan, package skeleton, lexer, diagnostics | Lexer tests pass | **Complete** (`d559f99`, `e439de2`) |
-| 2 | Preprocessor hardening (macros, directives, diagnostics, modes) | Preprocessor tests pass | **Complete** (this milestone) |
-| 3 | AST + recursive-descent parser | Parser tests pass | **Complete** (this milestone) |
-| 4 | Type system + semantic analysis | Sema tests pass | Pending |
-| 5 | Codegen: arithmetic, locals, return, first end-to-end program | `nova-run` executes a C program | Pending |
-| 6 | Calls, recursion, globals, ABI tests | Recursive fib runs | Pending |
-| 7 | Control flow (`if`, loops, `switch`) | Loop/switch tests pass | Pending |
-| 8 | Pointers, arrays, strings, structs, enums, typedefs | Pointer/struct tests pass | Pending |
-| 9 | libnova headers and functions | libnova tests pass | Pending |
-| 10 | `nova-cc` CLI, `-c`/`-S`/`-E`, multi-TU linking | CLI tests pass | Pending |
-| 11 | Documentation and readiness update | Full suite green | Pending |
+| 1 | **Compiler foundation** — architecture plan, package skeleton, diagnostics, lexer | Lexer tests pass | **Complete** (`d559f99`, `e439de2`) |
+| 2 | **Preprocessor** — directives, macros, conditionals, includes, language modes, regression hardening | Preprocessor tests pass | **Complete** (`cd767d4`, hardened in this milestone) |
+| 3 | **Parser and AST** — recursive-descent parser, syntax-level AST, declarations/declarators/expressions/statements, diagnostics | Parser tests pass | **Complete** (`1d85cdd`, hardened in this milestone) |
+| 4 | **Type system and semantic analysis** — type representation, scopes, name resolution, type checking, expression/statement semantics, annotations | Sema tests pass | **Complete** (this milestone) |
+| 5 | **Nova64 code generation** — lower validated AST/IR into Nova assembly; frames, calls, control flow, supported data types; codegen tests | Generated assembly assembles and a C program runs under `nova-run` | Pending |
+| 6 | **Compiler driver and toolchain integration** — `nova-cc` CLI, preprocessing/parsing/sema/codegen/assembler/linker pipeline, compilation modes, end-to-end tests | End-to-end CLI tests pass | Pending |
+| 7 | **Runtime, libnova and end-to-end validation** — compiler runtime support, freestanding libnova, representative programs through compile/assemble/link/emulate, documented coverage, repeatable validation suite | Phase 1 validation suite green | Pending |
 
-Each step is committed separately after its tests pass.
+**Mandatory phase gate:** do not begin Phase 2 until all seven milestones above
+are complete, tested, documented, and committed, and produce a Phase 1
+completion report. Milestone 4 completion does **not** authorize Phase 2 and does
+not start Milestone 5 automatically without explicit direction.
 
-### Step 2 implementation notes (preprocessor)
+### Milestone 2 implementation notes (preprocessor)
 
-- **Pipeline/API:** `nova.cc.preprocessor` provides `Preprocessor`, `preprocess(...)`
-  (text output for future `nova-cc -E`) and `preprocess_to_tokens(...)` (token
-  stream for the parser). The API remains stable and accepts language/include
-  configuration (`language`, `include_paths`, `system_include_paths`, `defines`,
-  `directory`). Public exports are available from `nova.cc`.
-- **Line processing and source locations:** backslash-newline splicing, logical-line
-  directive handling, and comment stripping are implemented. Tokens carry logical
-  file/line information; `#line` remapping updates the logical file/line used for
-  subsequent tokens and for `__FILE__`/`__LINE__` expansion (physical source identity
-  is still used for include processing where appropriate).
-- **Macro expansion:** object-like and function-like macros use hide-set (blue-paint)
-  expansion with rescanning that reinserts replacement tokens ahead of remaining
-  input. This supports argument prescan in invocation context, direct and indirect
-  recursion suppression, nested function-like macro invocations, and function-like
-  invocations formed across expansion boundaries. Macro redefinition is diagnosed
-  unless identical; expansion depth/termination guards prevent infinite recursion.
-- **`#` / `##` / variadics:** stringification uses argument token spellings with
-  whitespace normalization based on lexer `leading_space` information and escaping
-  required for embedding quoted/backslash characters in string literals. `##` is
-  applied in substituted replacement sequences before rescanning, supports
-  consecutive pastes, handles empty operands via placemarkers in common cases, and
-  diagnoses invalid pasted tokens. Variadic macros (`...`, `__VA_ARGS__`) support
-  empty and nested-parenthesized arguments. GNU-style `, ## __VA_ARGS__` comma
-  elision is supported as an optional extension and is not claimed as ISO C behavior.
-- **Conditionals and directives:** `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`,
-  `#endif`, `defined`/`defined(...)`, `#include`, `#define`, `#undef`, `#pragma once`,
-  `#error`, and `#line` are implemented. Conditional expressions are evaluated by a
-  dedicated integer-constant-expression parser (no Python `eval()`), with macro
-  expansion and undefined identifiers treated as `0`. Unknown pragmas are ignored.
-  Unterminated conditionals, malformed directives, argument-count mismatches, and
-  invalid macro operations produce diagnostics.
-- **Includes:** quoted and angle-bracket header names are supported, including
-  computed includes after macro expansion for string-literal and `<...>` forms.
-  Resolution is deterministic (including file directory for quoted includes, then
-  configured include paths/system include paths), with include-cycle detection, max
-  include depth, missing-file diagnostics, `#pragma once`, and rejection of
-  absolute and `..`-containing include names as a safety restriction.
-- **Language modes and built-ins:** `__FILE__` and `__LINE__` expand dynamically.
-  The default documented mode is `nova-c11` (freestanding-oriented): `__STDC__=1`
-  and `__STDC_HOSTED__=0` are predefined. `__STDC_VERSION__` is defined only for
-  explicit standard-level modes (`c11` => `201112L`, `c99` => `199901L`); custom
-  modes may omit these macros. No hosted-library or full ISO C conformance is claimed.
-- **Remaining preprocessor limitations:** not a complete ISO C preprocessor. Original
-  whitespace/newline layout is not fully preserved in `-E`-style text rendering,
-  logical/physical location mapping is line-oriented (not fully precise for all
-  splice/expansion column cases), computed include reconstruction for unusual token
-  sequences may be limited, `_Pragma`, `#embed`, digraph/trigraph preprocessing
-  features, and some obscure standard corner cases are not implemented. GNU
-  `, ## __VA_ARGS__` is an extension. Tests: `tests/test_cc_lexer.py` and
-  `tests/test_cc_preprocessor.py` cover lexing, macro expansion/prescan/recursion,
-  `#`/`##`/variadics, conditionals, includes/guards, `#line`, built-ins/modes, and
-  directive diagnostics.
+- **Pipeline/API:** `Preprocessor`, `preprocess(...)` (text output for future
+  `nova-cc -E`) and `preprocess_to_tokens(...)` (token stream for the parser).
+  Configuration: `language`, `include_paths`, `system_include_paths`, `defines`,
+  `directory`.
+- **Source mapping:** `SpliceSegment`/`LogicalLine` map logical columns back to
+  physical line/column across backslash-newline splices. Token `leading_space`
+  is preserved for deterministic text output and stringification.
+- **Macro expansion:** hide-set (blue-paint) expansion with rescanning, argument
+  prescan, recursion suppression, `#`/`##`, variadics, and GNU `, ## __VA_ARGS__`
+  comma elision (explicitly an extension, not ISO C).
+- **Directives:** `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif`,
+  `defined`, `#include`, `#define`, `#undef`, `#pragma once`, `#error`, `#line`,
+  and the `_Pragma("...")` operator (in ordinary text and macro expansion).
+  Conditional expressions use a dedicated integer-constant-expression parser.
+- **Includes:** quoted and angle forms including computed includes built from
+  expanded tokens (nested macros, whitespace/token-boundary variants). Resolution
+  is deterministic; cycle/depth limits, `#pragma once`, and rejection of absolute
+  and `..` paths are retained.
+- **Language modes:** `__FILE__`/`__LINE__` are dynamic. `nova-c11` and `c11`
+  define `__STDC__`/`__STDC_HOSTED__`; `__STDC_VERSION__` is defined only for
+  explicit standard levels (`c11` => `201112`, `c99` => `199901`). No hosted or
+  full ISO C conformance is claimed.
+- **Not implemented:** `#embed`, trigraphs, digraphs, and obscure ISO corner
+  cases; original whitespace/newline layout is not reproduced exactly.
 
-### Step 3 implementation notes (parser and AST)
+### Milestone 3 implementation notes (parser and AST)
 
-- **Pipeline/API:** `nova/cc/ast.py` defines syntax-level AST nodes with source
-  locations for translation units, declarations/specifiers/qualifiers, declarators
-  (identifiers, pointers, arrays, function declarators, parenthesized and abstract
-  declarators), parameters, initializers, expressions, statements, and function
-  definitions. `nova/cc/parser.py` implements a hand-written recursive-descent parser
-  consuming preprocessed tokens. `nova.cc` exposes `Parser`, `parse(tokens, ...)`,
-  and `parse_source(source, ...)` (C source → preprocessor → parser → AST) while
-  keeping the preprocessor API stable.
-- **Declarations and declarators:** supports declaration specifiers including
-  storage classes, type qualifiers, function specifiers, primitive type sequences,
-  struct/union/enum specifiers, and typedef names. Parses init-declarators, multiple
-  declarators per declaration, initializers (including brace initializer lists), and
-  C declarator structure for pointers, arrays, function declarators, parenthesized
-  declarators, pointer-to-array, arrays of pointers, function pointers, and functions
-  returning pointers. Struct/union members and enum enumerators are parsed; bit-field
-  declarators are parsed when present in the member syntax.
-- **Expressions:** precedence-climbing/recursive-descent expression parsing covers
-  primary expressions, postfix operations (call, subscript, `.`/`->`, postfix
-  `++/--`), unary operators, `sizeof` (expression and type-name forms), casts,
-  multiplicative/additive/shift/relational/equality/bitwise/logical operators,
-  conditional `?:`, assignment operators, and comma expressions with C associativity.
-- **Statements:** parses compound statements, declarations in blocks, expression/null
-  statements, `if`/`else`, `while`, `do`/`while`, `for` (including declaration init
-  where supported by the parser), `switch`/`case`/`default`, `break`, `continue`,
-  `return`, `goto`, and labels.
-- **Diagnostics and recovery:** syntax errors are reported as source-located
-  `CompileError` diagnostics (unexpected tokens, missing delimiters/`;`, malformed
-  declarations/expressions/declarators, unmatched braces, unexpected EOF in tested
-  cases). Basic synchronization is implemented at top-level/block boundaries to avoid
-  infinite loops; the current parser fails fast with a useful diagnostic rather than
-  producing a recovered multi-error parse.
-- **Supported subset (syntax):** sufficient C declaration/declarator/expression/
-  statement forms for early Phase 1 semantic analysis and code generation work,
-  including structs/unions/enums, typedef names, pointers/arrays/functions, and core
-  control flow. Not yet a complete C grammar: abstract declarator/type-name coverage
-  is limited to common cast/sizeof cases, K&R old-style function definitions are not
-  a target, designated initializers/compound literals/generic selections/VLAs/flexible
-  array edge cases and some standard declarator corners may be incomplete, and no
-  semantic/type validation is performed yet.
-- **Tests:** `tests/test_cc_parser.py` covers basic translation-unit/function parsing,
-  required declarator forms, expressions/precedence/associativity, statements/control
-  flow, declarations/specifiers/typedefs/aggregates/enums, preprocessed source
-  parsing, and representative error cases.
+- **AST:** syntax-level nodes with source locations for declarations,
+  declarators, parameters, initializers, expressions and statements. New nodes:
+  `CompoundLiteral`, `GenericAssociation`, `GenericSelection`.
+- **Grammar coverage:** declaration specifiers, typedef names, pointers, arrays,
+  functions, parenthesized/abstract declarators, struct/union/enum members,
+  bit-field syntax, designated initializers, compound literals, `_Generic`, VLA
+  bounds, and flexible array members.
+- **Diagnostics:** source-located `CompileError`s with bounded, deterministic
+  fail-fast recovery at top-level/block boundaries. K&R definitions remain
+  intentionally unsupported.
 
-## 7. Known Phase 1 limitations (to be documented honestly)
+### Milestone 4 implementation notes (type system and semantic analysis)
 
-- No floating point (base ISA has none).
-- No bit-fields, VLAs, `_Atomic`, `_Generic`, `_Complex`.
-- No PIC/GOT code generation yet; globals use absolute `LA64`/`ABS64`.
-- No automatic linker relaxation; `--long-calls` is the supported workaround.
-- No optimizer: every temporary is a stack slot.
-- Variadic support is limited until compiler builtins for `va_start`/`va_arg`
-  are added; `stdarg.h` is provided as the documented target.
-- `long double` is not supported.
+- **Public API:** `nova.cc.analyze(tree, target="nova64")` returns the same
+  annotated `TranslationUnit`; `Analyzer`, `Symbol`, `Scope`, `SemanticError` are
+  available from `nova.cc.sema`. No driver/CLI entry point was added.
+- **Type architecture:** `nova/cc/types.py` defines `Qualifiers`, primitive,
+  pointer, array, function, struct, union and enum types, `TypeContext`, type
+  equality/compatibility, completeness, size/alignment, integer promotion and
+  usual arithmetic conversions. Widths/ranks follow `docs/NOVA_C_ABI.md` (LP64,
+  8-byte pointers/long, 4-byte int, unsigned plain `char`, max alignment 16).
+  Floating types carry `lowering_supported = False`.
+- **Symbol/scope passes:** file, function, block and prototype scopes with
+  separate ordinary/tag/label namespaces, shadowing, redeclarations, typedef
+  aliases, forward tag declarations, aggregate/enum completion, duplicate member
+  and enumerator checks, and bit-field/flexible-array constraints (simplified
+  layout where the ABI is silent).
+- **Declaration and expression passes:** specifier validation, declarator type
+  construction preserving pointer/array/function nesting, parameter adjustment,
+  identifier resolution, constant folding, lvalue checks, conversions, pointer
+  arithmetic, casts, `sizeof`, calls, member access, compound literals and
+  `_Generic`.
+- **Initializer and statement passes:** scalar/aggregate/designated initializers,
+  excess-element checks, return-type checks, `break`/`continue`/`case`/`default`
+  context and duplicate checks, `goto` label resolution, and duplicate label
+  checks. This is local validation, not a complete control-flow/data-flow
+  analysis.
+- **AST annotations:** `resolved_type`, `symbol`/`resolved_symbol`,
+  `value_category`, `const_value`, plus `scope`, `semantic_ok`, and
+  `type_context` on the translation unit. These are stable attributes for the
+  future lowering pass; syntax nodes remain distinct from semantic types.
+- **Tests:** `tests/test_cc_sema.py` (type model, declarators, valid programs,
+  all required negative diagnostics, annotations). Targeted lexer/preprocessor
+  (93), parser (69), and sema (65) tests pass; full suite 2076 passed,
+  `compileall` clean, conformance 18/18.
 
-## 8. Definition of done
+## 7. Known limitations (documented honestly)
+
+- No Nova64 code generation, executable, CLI, runtime or libnova yet.
+- No floating-point lowering; floating constants are rejected by the lexer.
+- Bit-field layout is provisional where `docs/NOVA_C_ABI.md` does not specify a
+  rule; `sizeof` of an incomplete type is not yet diagnosed.
+- Some implicit-conversion checks are deliberately conservative; diagnostics
+  target the supported subset rather than full ISO C conformance.
+- Not a complete ISO C preprocessor: `#embed`, trigraphs, digraphs, and some
+  obscure standard corner cases are intentionally omitted. GNU
+  `, ## __VA_ARGS__` remains an extension.
+- No PIC/GOT code generation, linker relaxation, optimizer, or complete variadic
+  call support; those belong to later milestones.
+- K&R old-style function definitions are intentionally unsupported.
+
+## 8. Definition of done (all seven milestones)
 
 - A C source file compiles with `nova-cc` into a `.nob` that halts correctly
   under `nova-run`.
@@ -279,3 +272,5 @@ Each step is committed separately after its tests pass.
 - Every diagnostic is source-located and deterministic.
 - Existing assembler, linker, emulator, object-format, and conformance tests
   continue to pass unchanged.
+- A Phase 1 completion report is produced and Phase 2 is started only after
+  explicit authorization.
