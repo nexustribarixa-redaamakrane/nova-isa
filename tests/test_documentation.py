@@ -98,7 +98,7 @@ def test_every_csr_and_exception_code_appears_in_the_prose(readme):
 #: pseudo-instructions, the magic bytes of the ``.nob`` and ``.nobj``
 #: containers, and the ``LA64`` relocation kind.
 PROSE_TOKENS = {"Z", "N", "C", "V", "PC", "MIN", "LI", "LA", "NOBV", "NOBJ",
-                "LA64", "ABS64", "PROFILE", "NOBO"}
+                "LA64", "ABS64", "PROFILE", "NOBO", "BL"}
 
 
 def test_readme_does_not_claim_an_instruction_that_does_not_exist(readme):

@@ -1046,8 +1046,14 @@ def assemble_object(source: str, *, source_path: Optional[str | Path] = None,
     # Statements of the form ``LA rd, symbol`` expand to a fixed-width LA64
     # block; everything else goes through the pseudo-expansion machinery.
     symbol_la: Dict[int, Tuple[str, str]] = {}
+    symbol_bl: Dict[int, str] = {}
     for index, statement in enumerate(text_entries):
         parts = statement.text.split(None, 1)
+        if len(parts) == 2 and parts[0].strip().upper() == "BL":
+            target = _split_operands(parts[1], statement.line_number)
+            if len(target) == 1 and _LABEL_RE.fullmatch(target[0]):
+                symbol_bl[index] = target[0]
+                continue
         if len(parts) != 2 or parts[0].strip().upper() != "LA":
             continue
         operands = _split_operands(parts[1], statement.line_number)
@@ -1060,13 +1066,21 @@ def assemble_object(source: str, *, source_path: Optional[str | Path] = None,
             if _LABEL_RE.fullmatch(target):
                 symbol_la[index] = (operands[0].strip(), target)
 
-    lengths = [MAX_LI_LENGTH if index in symbol_la else 1 for index in range(count)]
+    lengths = [
+        (MAX_LI_LENGTH + 1 if index in symbol_bl else
+         MAX_LI_LENGTH if index in symbol_la else 1)
+        for index in range(count)
+    ]
     expansions: Optional[List[List[str]]] = None
     for _ in range(1 + 8 * count + 2):
         labels = _layout_labels(text_entries, [], 0, lengths)
         expansions = []
         for index, statement in enumerate(text_entries):
-            if index in symbol_la:
+            if index in symbol_bl:
+                expansions.append(
+                    li_maximal("r15", 0, statement.line_number) + ["JMP r15"]
+                )
+            elif index in symbol_la:
                 rd, _ = symbol_la[index]
                 expansions.append(li_maximal(rd, 0, statement.line_number))
             else:
@@ -1294,7 +1308,11 @@ def assemble_object(source: str, *, source_path: Optional[str | Path] = None,
 
     pc = 0
     for index, statement in enumerate(text_entries):
-        if index in symbol_la:
+        if index in symbol_bl:
+            name = symbol_bl[index]
+            ensure_symbol(name)
+            reloc_rows.append((0, pc, name, "PCREL_LONG"))
+        elif index in symbol_la:
             _, name = symbol_la[index]
             ensure_symbol(name)
             reloc_rows.append((0, pc, name, "LA64"))

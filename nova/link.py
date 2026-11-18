@@ -60,7 +60,7 @@ from .isa import (
 )
 from .nob import NobError, NobImage, encode_nob
 from .object import ObjectError, ObjectFile, Symbol, encode_object
-from .pseudo import li_maximal
+from .pseudo import MAX_LI_LENGTH, li_maximal
 
 __all__ = [
     "DEFAULT_ENTRY_SYMBOL",
@@ -89,6 +89,7 @@ RESOLVED_PCREL_RANGE = (-(1 << 13), (1 << 13) - 1)
 _PCREL_KIND = "PCREL_DISP14"
 _LA64_KIND = "LA64"
 _ABS64_KIND = "ABS64"
+_LONG_KIND = "PCREL_LONG"
 
 
 class LinkError(ValueError):
@@ -222,7 +223,8 @@ def link_objects(objects: Iterable[ObjectFile], *,
         if not low <= delta <= high:
             raise LinkError(
                 f"relocation of '{symbol.name}' at 0x{site:x} overflows the "
-                f"signed 14-bit displacement: displacement 0x{delta:x}"
+                f"signed 14-bit displacement: displacement 0x{delta:x}; "
+                "use BL for an out-of-range jump"
             )
         decoded = decode_instruction(word_at(site))
         if decoded is None:
@@ -273,6 +275,26 @@ def link_objects(objects: Iterable[ObjectFile], *,
             )
         result[offset:offset + 8] = value.to_bytes(8, "little")
 
+    def rewrite_long(site: int, symbol: Symbol, value: int) -> None:
+        """Rewrite a fixed 10-word LI r15 / JMP r15 long-branch block."""
+        if not 0 <= value <= WORD_MASK:
+            raise LinkError(
+                f"relocation of '{symbol.name}' at 0x{site:x} overflows the "
+                f"64-bit address space: address 0x{value:x}"
+            )
+        decoded = decode_instruction(word_at(site))
+        if (decoded is None or decoded.mnemonic != "MOVI"
+                or decoded.register("rd") != 15):
+            raise LinkError(
+                f"PCREL_LONG relocation of '{symbol.name}' at 0x{site:x} does "
+                "not start at a MOVI r15 block"
+            )
+        for offset, line in enumerate(li_maximal("r15", value)):
+            write_word(site + offset * INSTRUCTION_BYTES,
+                       assemble_statement(line, 0, 0, {}))
+        write_word(site + MAX_LI_LENGTH * INSTRUCTION_BYTES,
+                   assemble_statement("JMP r15", 0, 0, {}))
+
     for obj_index, obj in enumerate(inputs):
         for relocation in obj.relocations:
             if relocation.kind == _PCREL_KIND:
@@ -281,6 +303,8 @@ def link_objects(objects: Iterable[ObjectFile], *,
                 apply = rewrite_la64
             elif relocation.kind == _ABS64_KIND:
                 apply = write_abs64
+            elif relocation.kind == _LONG_KIND:
+                apply = rewrite_long
             else:
                 raise LinkError(
                     f"unsupported relocation kind {relocation.kind!r}"

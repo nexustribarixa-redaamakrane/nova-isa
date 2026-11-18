@@ -418,7 +418,7 @@ less: RET
 
 ### 16.1 Pseudo-instructions
 
-`LI rd, imm` and `LA rd, target` are assembler pseudo-instructions: they have no opcode, never appear in a `.nob` image, and are never produced by the disassembler. Each expands to a canonical sequence of real instructions whose length is deterministic for a given constant.
+`LI rd, imm`, `LA rd, target`, and `BL target` are assembler pseudo-instructions: they have no opcode, never appear in a `.nob` image, and are never produced by the disassembler. Each expands to a canonical sequence of real instructions whose length is deterministic for a given constant. `BL` is an unconditional long jump: it expands to a maximal-width `LI r15, target` followed by `JMP r15`, and in relocatable objects it carries a `PCREL_LONG` relocation so the linker can fill in the absolute target. It is the prescribed replacement when a `PCREL_DISP14` branch overflows the signed 14-bit displacement.
 
 `LI rd, imm` loads an arbitrary signed or unsigned 64-bit constant. If `imm` fits an unsigned 14-bit immediate, it expands to a single `MOVI`; otherwise it expands to `MOVI rd, top` followed by one `SHLI rd, rd, 13` / `ORI rd, rd, chunk` pair per lower 13-bit chunk. Expansion length grows monotonically and is bounded at nine instructions. `LA rd, target` loads the absolute link address of `target` and expands exactly like `LI`; the assembler converges label offsets with a monotone fixed-point pass.
 
@@ -538,7 +538,7 @@ These suffixes are registered format names, published as `nova.FILE_FORMATS`; `n
 
 - **Sections.** A name, a kind (`progbits` carrying image bytes, `nobits` carrying no bytes), flags (`alloc`, `exec`, `write`, `read`), an alignment power of two, and a size.
 - **Symbols.** A name, binding (`local` or `global`), a section index (`0xFFFFFFFF` for an undefined external), and a value that is the symbol's offset within its section.
-- **Relocations.** `PCREL_DISP14` records a branch or call to an undefined symbol; `LA64` records an `LA` whose target is a symbol and whose expansion is the fixed nine-instruction maximal `LI` block; `ABS64` records a 64-bit absolute address for `.quad symbol`.
+- **Relocations.** `PCREL_DISP14` records a branch or call to an undefined symbol; `LA64` records an `LA` whose target is a symbol and whose expansion is the fixed nine-instruction maximal `LI` block; `ABS64` records a 64-bit absolute address for `.quad symbol`; `PCREL_LONG` records a ten-word `BL` block for out-of-range jumps.
 
 `LA` to a symbol becomes an `LA64` relocation over a fixed maximal-width expansion, so no relocatable constant depends on a load address. `.global`/`.globl` names appear in the symbol table with global binding. Encoding is deterministic and decoding rejects malformed, truncated, or over-long streams.
 

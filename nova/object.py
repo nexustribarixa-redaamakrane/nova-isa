@@ -121,6 +121,8 @@ NOBJ_HEADER_SIZE = 32
 #: the linker re-encodes the resolved address into the block (see
 #: :mod:`nova.pseudo`). ``ABS64`` names an 8-byte little-endian data word
 #: (from ``.quad target``) that holds the symbol's resolved absolute address;
+#: ``PCREL_LONG`` names a fixed 10-word ``LI r15, target`` / ``JMP r15`` block
+#: used by the long-branch pseudo-instruction for out-of-range jumps.
 #: the linker writes ``value + addend`` into those bytes. The assembler emits
 #: ``PCREL_DISP14`` only for branch/call targets that name an undefined
 #: external symbol, ``LA64`` for any ``LA`` whose target is a symbol, and
@@ -129,6 +131,7 @@ RELOCATION_KIND_BY_NAME: Mapping[str, int] = {
     "PCREL_DISP14": 0,
     "LA64": 1,
     "ABS64": 2,
+    "PCREL_LONG": 3,
 }
 RELOCATION_KIND_BY_BYTE = {v: k for k, v in RELOCATION_KIND_BY_NAME.items()}
 
@@ -139,6 +142,7 @@ RELOCATION_SPAN_BYTES: Mapping[str, int] = {
     "PCREL_DISP14": INSTRUCTION_BYTES,
     "LA64": 9 * INSTRUCTION_BYTES,
     "ABS64": 8,
+    "PCREL_LONG": 10 * INSTRUCTION_BYTES,
 }
 
 SECTION_KIND_BY_NAME: Mapping[str, int] = {

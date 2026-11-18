@@ -45,6 +45,7 @@ __all__ = [
     "PSEUDO_INSTRUCTIONS",
     "expand_la",
     "expand_li",
+    "expand_bl",
     "expand_pseudo",
     "is_pseudo",
     "li_maximal",
@@ -55,6 +56,7 @@ __all__ = [
 PSEUDO_INSTRUCTIONS: dict[str, str] = {
     "LI": "load a full 64-bit constant into a register",
     "LA": "load the absolute address of a label, or an integer address",
+    "BL": "unconditional long jump using a full-width LI and JMP",
 }
 
 #: Instructions in a fixed-width (``li_maximal``) expansion: a ``MOVI`` top
@@ -154,6 +156,27 @@ def expand_la(rd: str, target: str, labels: Mapping[str, int],
     return _li_sequence(register, address & WORD_MASK)
 
 
+def expand_bl(target: str, labels: Mapping[str, int],
+              line: int | None = None) -> List[str]:
+    """Expand ``BL target`` into a full-width address load and an indirect jump."""
+    name = target.strip()
+    if name in labels:
+        address = labels[name]
+    else:
+        try:
+            address = parse_integer(name, line)
+        except AssemblyError as exc:
+            raise AssemblyError(
+                f"unknown BL target {target!r}: not a label or integer address",
+                line,
+            ) from exc
+    if not _SIGNED_MIN <= address <= WORD_MASK:
+        raise AssemblyError(
+            f"BL address {target!r} is outside the 64-bit address space", line
+        )
+    return _li_sequence("r15", address & WORD_MASK) + ["JMP r15"]
+
+
 def expand_pseudo(text: str, line: int | None = None,
                   labels: Mapping[str, int] | None = None) -> List[str]:
     """Expand one statement if it is a pseudo-instruction, otherwise return it.
@@ -174,6 +197,12 @@ def expand_pseudo(text: str, line: int | None = None,
                 line,
             )
         return expand_li(operands[0], operands[1], line)
+    if mnemonic == "BL":
+        if len(operands) != 1:
+            raise AssemblyError(
+                f"BL expects a target, got {len(operands)} operand(s)", line
+            )
+        return expand_bl(operands[0], {} if labels is None else labels, line)
     if len(operands) != 2:
         raise AssemblyError(
             f"LA expects rd and a label, got {len(operands)} operand(s)", line

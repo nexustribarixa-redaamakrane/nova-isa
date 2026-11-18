@@ -363,6 +363,42 @@ ptr: .quad target
         link_objects([obj, holder])
 
 
+def test_long_branch_reaches_an_out_of_range_target():
+    caller = assemble_object("""
+.global _start
+_start:
+    BL far
+    HALT
+""")
+    from nova.assembler import assemble_text
+    far_code = assemble_text("MOVI r1, 5\nHALT\n")
+    callee = validate(ObjectFile(
+        sections=(text_section(far_code, alignment=0x8000),),
+        symbols=(symbol("far", section=0, binding="global"),),
+        relocations=(),
+    ))
+    image = link_objects([caller, callee])
+    machine = NovaMachine(code=image.image, entry=image.image_base)
+    machine.priv = PRIVILEGE_LEVELS["machine"]
+    machine.pc = image.entry
+    for _ in range(20):
+        if machine.halted:
+            break
+        machine.step()
+    assert machine.halted
+    assert machine.regs[1] == 5
+
+
+def test_long_branch_relocation_must_start_at_a_movi_r15():
+    base = assemble_object(
+        ".global _start\n_start:\n" + "\n".join("  NOP" for _ in range(10)) + "\n"
+    )
+    obj = replace(base, relocations=(Relocation(
+        section=0, offset=0, kind="PCREL_LONG", symbol=0, addend=0),))
+    with pytest.raises(LinkError, match="does not start at a MOVI r15 block"):
+        link_objects([obj])
+
+
 def test_unsupported_relocation_kind_is_reported():
     base = assemble_object(".global _start\n_start:\n  NOP\n")
     obj = replace(base, relocations=(Relocation(
