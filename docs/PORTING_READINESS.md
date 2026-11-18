@@ -26,10 +26,11 @@ This document is an audit, not a promise of work.
 | Virtualization with two-dimensional translation | `VMLAUNCH`/`VMRESUME`/`VMEXIT`, `vpc`/`vptbr`/`s2ptbr` |
 | Object capabilities + stable identities + NOBO v1 | `nova/objfmt.py`, `OBJ.*` |
 | ABI v1.0 calling convention + standard syscall table | `README.md` section 15, `nova/syscalls.py` |
-| Assembler data directives | `.byte`, `.hword`, `.word`, `.quad`, `.asciz`, `.space`, `.align`, `.section`, `.global`/`.globl` |
-| Relocation kinds | `PCREL_DISP14`, `LA64`, `ABS64` in `nova/object.py` |
-| Containers and tools | `.nob` v1, `.nobj` v1, `nova-as`/`nova-ld`/`nova-objdump`/`nova-run` |
-| Verification | 1,789 tests, 18/18 conformance vectors, `compileall` |
+| Assembler directives | `.global`/`.globl`, `.section`, data directives, `.type`/`.size`, `.file`/`.loc`/`.cfi_*`, `.include`, `.macro`/`.endm` |
+| Relocation kinds | `PCREL_DISP14`, `LA64`, `ABS64`, `PCREL_LONG` in `nova/object.py` |
+| Containers and tools | `.nob` v1, `.nobj` v2 (v1 readable), `.nox` v1, `nova-as`/`nova-ld`/`nova-objdump`/`nova-run` |
+| C ABI and runtime contracts | `docs/NOVA_C_ABI.md`, `docs/COMPILER_RUNTIME.md`, `nova/cabi.py` |
+| Verification | 1,837 tests, 18/18 conformance vectors, `compileall` |
 
 ## 2. Readiness matrix
 
@@ -43,27 +44,42 @@ This document is an audit, not a promise of work.
 | Port OpenWindows to arm64 | **No (separate project)** | Requires an AArch64 HAL (GIC, MMU, EL exceptions), UEFI boot, aarch64 toolchain; Nova code contributes nothing directly |
 | Hardware core | **No artifact yet** | Conformance suite is the contract; no RTL exists |
 
-## 3. Blocking gaps for a real compiler
+## 3. Compiler readiness after Phase 0
 
-1. **No large-immediate instruction.** There is no `LUI`; constants need the
-   nine-word `LI` expansion. Position-independent code and GOT access have no
-   defined model.
-2. **Branch range.** ±8191 bytes from the branch instruction, and `nova-ld`
-   performs no relaxation. Large generated functions will not link.
-3. **Relocation set is minimal.** Only `PCREL_DISP14`, `LA64`, `ABS64`. No GOT,
-   PLT, TLS, weak/global-dynamic, or copy relocations; no dynamic linker.
-4. **Debug format.** `.nox` is a reserved name with no defined layout, so no
-   DWARF/source-level debugging.
-5. **Assembly syntax gaps.** No `.type`, `.size`, `.cfi`, `.file`, `.loc`,
-   macro/include facilities, or conditional assembly — compiler-generated
-   assembly and hand-written runtime startup usually need these.
-6. **Calling convention details.** Integer-only `a0`-`a5`; no defined struct
-   return, varargs alignment beyond the 16-byte stack rule, or floating-point
-   convention (the base ISA has no FP).
-7. **Runtime library.** No libgcc-equivalent builtins (128-bit divide, `mulhi`,
-   stack probing), no freestanding libc, no startup files.
-8. **Linker features.** No weak symbols, linker scripts, dead-code elimination,
-   PIE, or shared libraries.
+Resolved in Phase 0 (see `docs/PHASE0_PLAN.md` for commits):
+
+- **`ABS64`** now has a linker applier, so `.quad symbol` links.
+- **Object metadata:** `.nobj` v2 carries symbol type and size; v1 files remain
+  readable. `.type`/`.size` are accepted by the assembler.
+- **Debug information:** `.nox` v1 is a real, versioned container with source,
+  location, call-frame and register-save records, driven by `.file`, `.loc`,
+  `.cfi_startproc`, `.cfi_offset`, and `.cfi_endproc`.
+- **Source facilities:** deterministic bounded `.include` and `.macro`/`.endm`
+  expansion with parameter substitution.
+- **C ABI:** `docs/NOVA_C_ABI.md` plus `nova.cabi` define data layout, argument
+  and struct-return rules, variadic `va_list`, PIC `gp` convention and soft
+  float; `docs/COMPILER_RUNTIME.md` specifies libgcc-equivalent helpers.
+- **Branch range:** `BL` provides an explicit ten-word long jump with a
+  `PCREL_LONG` relocation; the linker reports an overflow with an actionable
+  suggestion to use it.
+
+Remaining blockers for a full GCC/LLVM-class compiler:
+
+1. **No large-immediate instruction.** `LUI` is deliberately deferred from the
+   frozen v1.0 ISA; constants still need the nine-word `LI` expansion.
+2. **No automatic relaxation.** An overflowing `PCREL_DISP14` is an error with a
+   suggested replacement; the linker does not insert long-branch stubs
+   automatically.
+3. **No PIC/GOT implementation.** The C ABI documents a `gp`-based GOT model,
+   but there are no GOT relocations, GOT section layout, or PIC linking yet.
+4. **Relocation set still limited** to `PCREL_DISP14`, `LA64`, `ABS64`, and
+   `PCREL_LONG`. No PLT, TLS, weak/copy relocations, or dynamic linker.
+5. **Debug format is Nova-specific.** `.nox` is documented and implemented, but
+   no DWARF bridge exists.
+6. **Runtime library** is specified, not implemented: no 128-bit helpers, no
+   freestanding libc, no startup files.
+7. **Linker features** still lack weak symbols, linker scripts, dead-code
+   elimination, PIE, and shared libraries.
 
 ## 4. Blocking gaps for a kernel
 
@@ -97,7 +113,7 @@ gone.
 
 | Phase | Deliverable | Gate to proceed |
 | --- | --- | --- |
-| 0. Toolchain hardening | Branch relaxation or long-branch sequences, GOT/PIC relocations, weak symbols, `.type`/`.size`/`.cfi`, `.nox` debug container | A generated C test object links and runs |
+| 0. Toolchain hardening | Done: symbol metadata, `.nox`, directives, includes/macros, C ABI/runtime docs, explicit long branches. Remaining: automatic relaxation, GOT/PIC, weak symbols | A generated C test object links and runs (remaining items still block full GCC/LLVM-class targets) |
 | 1. Compiler + libc | Freestanding C-subset compiler emitting Nova assembly, plus a minimal `libnova` (start files, syscall wrappers, printf/mem/string) | Compile and run a nontrivial C program on `nova-run` |
 | 2. Nova64 kernel | Boot protocol in the emulator, machine-mode trap shim, supervisor kernel, MMU userspace, scheduler, minimal device ABI, userland libc | Run a userspace process through syscall/MMU path |
 | 3. OpenWindows Nova64 slice | Nova HAL, syscall bridge, OWX loader port, using Phases 1-2 | One OpenWindows subsystem boots and runs |

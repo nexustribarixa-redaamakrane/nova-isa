@@ -111,13 +111,16 @@ Object v2 symbol metadata ──► assembler .type/.size
 | # | Item | Status |
 | --- | --- | --- |
 | 0 | Audit + plan + LUI decision | Done |
-| 1 | ABS64 linker applier + tests | Pending |
-| 2 | Object v2 symbol type/size + `.type`/`.size` | Pending |
-| 3 | `.nox` debug format + `.file`/`.loc`/`.cfi_*` | Pending |
-| 4 | `.include` + `.macro` | Pending |
-| 5 | C ABI specification + compiler runtime requirements | Pending |
-| 6 | Linker relaxation / long branches / PIC-GOT | Pending |
-| 7 | Update `PORTING_READINESS.md` and final verification | Pending |
+| 1 | ABS64 linker applier + tests | Done (`e8a9c72`) |
+| 2 | Object v2 symbol type/size + `.type`/`.size` | Done (`c1e11e7`) |
+| 3 | `.nox` debug format + `.file`/`.loc`/`.cfi_*` | Done (`7b827e8`) |
+| 4 | `.include` + `.macro` | Done (`a9c2935`) |
+| 5 | C ABI specification + compiler runtime requirements | Done (`d8306b0`) |
+| 6 | Long branches (`BL` + `PCREL_LONG`) | Done (`9f4d99d`) |
+| 6b | Automatic linker relaxation | Remaining Phase 0 work |
+| 6c | PIC/GOT relocations and addressing | Remaining Phase 0 work |
+| 6d | Weak symbols, linker scripts, dynamic linking | Out of scope for this pass |
+| 7 | Update `PORTING_READINESS.md` and final verification | Done |
 
 ## 6. Definition of done
 
