@@ -1,0 +1,9 @@
+; Example: hello.no — the classic minimum runnable Nova program.
+;
+;   nova-as hello.no            -> builds hello.nob at image base 0x1000
+;   nova-run hello.nob          -> halted after 2 step(s), r1 == 42
+;
+; Runs at machine privilege by default so a bare program may HALT.
+
+    MOVI r1, 42     ; the answer
+    HALT            ; stop the machine

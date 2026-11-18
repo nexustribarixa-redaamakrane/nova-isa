@@ -1,0 +1,726 @@
+You are implementing **Nova**, an original 64-bit instruction-set architecture (ISA).
+
+Your task is to turn the current Nova ISA concept into a **concrete, internally consistent, implementable ISA specification and reference implementation**.
+
+# IMPORTANT SCOPE RULE
+**Implement the Nova ISA only.**
+
+Do **NOT** design or implement:
+
+- Nova CPU product families;
+- Nova processor models;
+- Nova Päivää;
+- Nova Oryn;
+- CPU microarchitectures;
+- cache hierarchies;
+- pipeline designs;
+- branch predictors;
+- out-of-order execution;
+- transistor/hardware designs;
+- specific silicon implementations;
+- processor marketing/product specifications.
+Those can be designed later.
+
+For this task, **Nova means the architectural contract exposed to software**.
+
+The result should answer:
+
+> "What must a conforming Nova processor do when executing Nova machine code?"
+It should NOT answer:
+
+> "How is a particular Nova CPU physically implemented?"
+
+---
+
+# 1. Nova architectural identity
+Nova is an independent **64-bit ISA**.
+
+Do not turn Nova into:
+
+- ARM/AArch64;
+- x86-64;
+- RISC-V;
+- MIPS;
+- PowerPC;
+- WebAssembly;
+- a renamed version of another ISA.
+Nova may use established computer-architecture concepts where appropriate, but its instruction definitions, architectural state, encoding, privilege model, memory model, and object/reference model must be explicitly defined as **Nova**.
+
+---
+
+# 2. Define the architectural state
+Specify exactly what state is visible to Nova software.
+
+Define:
+
+- general-purpose registers;
+- program counter;
+- status/flags state, if Nova has one;
+- control/status registers;
+- privilege state;
+- exception state;
+- interrupt state;
+- memory-management state;
+- object/reference state;
+- any other architecturally visible state.
+For every register specify:
+
+- name;
+- width;
+- encoding;
+- purpose;
+- reset value;
+- read/write behavior;
+- privilege requirements;
+- reserved bits.
+Do not leave the register architecture vague.
+
+---
+
+# 3. 64-bit execution model
+Define what "64-bit Nova" means.
+
+Specify:
+
+- native integer width;
+- address width;
+- register width;
+- pointer/reference width;
+- supported smaller integer widths;
+- sign extension;
+- zero extension;
+- overflow behavior;
+- arithmetic behavior;
+- shift behavior;
+- comparison behavior.
+Clearly distinguish:
+
+```
+register width
+≠
+virtual address width
+≠
+physical address width
+```
+if those values differ.
+
+---
+
+# 4. Instruction encoding
+Design a real Nova machine-code encoding.
+
+Define:
+
+- instruction width;
+- alignment;
+- opcode fields;
+- register fields;
+- immediate fields;
+- addressing fields;
+- extension fields;
+- reserved bits;
+- illegal encodings;
+- endianness;
+- instruction-fetch rules.
+Every instruction must have an **unambiguous binary representation**.
+
+Create an authoritative instruction-encoding table.
+
+For every instruction, document:
+
+```
+Instruction name
+Encoding
+Operands
+Assembly syntax
+Operation
+Flags/state affected
+Exceptions
+Privilege requirements
+```
+Do not create conflicting encodings.
+
+---
+
+# 5. Instruction set
+Define a coherent initial Nova instruction set.
+
+At minimum, cover:
+
+## Integer arithmetic
+
+- addition;
+- subtraction;
+- multiplication;
+- division;
+- remainder;
+- immediate arithmetic.
+Define signed and unsigned behavior explicitly.
+
+## Logical operations
+
+- AND;
+- OR;
+- XOR;
+- NOT;
+- shifts;
+- rotates if appropriate.
+
+## Comparisons
+Define:
+
+- equality;
+- inequality;
+- signed comparison;
+- unsigned comparison;
+- zero/sign conditions.
+
+## Data movement
+Define:
+
+- register-to-register movement;
+- immediate loading;
+- loads;
+- stores;
+- byte accesses;
+- halfword accesses;
+- word accesses;
+- doubleword accesses.
+Specify alignment and fault behavior.
+
+## Control flow
+Define:
+
+- unconditional branches;
+- conditional branches;
+- indirect branches;
+- calls;
+- returns;
+- traps;
+- system calls.
+
+---
+
+# 6. Memory architecture
+Define Nova's architectural memory model.
+
+Specify:
+
+- virtual addresses;
+- physical addresses;
+- address translation;
+- alignment;
+- access permissions;
+- executable/read/write permissions;
+- user/supervisor permissions;
+- memory faults;
+- memory ordering;
+- atomicity.
+The specification must be detailed enough for an operating-system developer to implement a Nova kernel.
+
+---
+
+# 7. Memory consistency model
+Define exactly how memory operations are ordered.
+
+Specify:
+
+- ordinary loads;
+- ordinary stores;
+- atomic operations;
+- acquire semantics;
+- release semantics;
+- fences;
+- synchronization between cores;
+- visibility guarantees.
+Do not simply state:
+
+> "Nova has a strong memory model."
+Define the actual rules.
+
+---
+
+# 8. Atomic operations
+Define the initial Nova atomic instruction set.
+
+Consider mechanisms such as:
+
+- compare-and-swap;
+- atomic exchange;
+- atomic add/subtract;
+- atomic load;
+- atomic store;
+- memory fences.
+For each atomic instruction define:
+
+- operands;
+- encoding;
+- success/failure behavior;
+- ordering semantics;
+- alignment;
+- exceptions.
+
+---
+
+# 9. Object/reference architecture
+Nova has a distinctive **object/reference-oriented architectural concept**.
+
+Treat this as part of the ISA itself rather than as a programming-language feature.
+
+Define precisely:
+
+- what an object is;
+- what a reference is;
+- reference representation;
+- reference width;
+- object identity;
+- reference validity;
+- null references;
+- permissions;
+- object metadata;
+- object access;
+- object creation;
+- object destruction;
+- invalid references;
+- reference comparison;
+- reference faults;
+- interaction with virtual memory;
+- interaction with privilege levels.
+If Nova uses dedicated object/reference registers, define them formally.
+
+If instructions such as:
+
+```
+OBJ.CREATE
+OBJ.GET
+OBJ.SET
+OBJ.DROP
+```
+are appropriate, define their actual semantics and encodings.
+
+However, **do not blindly use these names**. Design the best coherent Nova instruction set.
+
+The important requirement is that the object system must have **precise architectural semantics**.
+
+It must not be magical pseudocode.
+
+---
+
+# 10. Exceptions
+Define a complete Nova exception model.
+
+Specify:
+
+- synchronous exceptions;
+- asynchronous interrupts;
+- exception codes;
+- illegal instructions;
+- arithmetic faults;
+- memory faults;
+- alignment faults;
+- privilege violations;
+- object/reference faults;
+- system calls;
+- exception entry;
+- saved architectural state;
+- exception return.
+Create an authoritative exception-code table.
+
+---
+
+# 11. Privilege architecture
+Define Nova's privilege model.
+
+Choose and document the privilege levels required by the ISA.
+
+For example, Nova may need architectural levels corresponding to:
+
+```
+user
+supervisor
+machine/firmware
+```
+but do not copy another ISA's privilege model without architectural justification.
+
+Define:
+
+- privilege transitions;
+- traps;
+- system calls;
+- interrupt handling;
+- privileged instructions;
+- privileged registers;
+- memory permissions.
+
+---
+
+# 12. Virtual memory and MMU interface
+Define the **architectural** MMU behavior.
+
+Do not design a specific CPU's internal MMU implementation.
+
+Define:
+
+- virtual address format;
+- physical address format;
+- page sizes;
+- page-table architecture;
+- page permissions;
+- address translation;
+- TLB architectural behavior where necessary;
+- TLB invalidation instructions;
+- page faults;
+- address-space control.
+The implementation may use any internal mechanism as long as it conforms to the Nova architectural contract.
+
+---
+
+# 13. Interrupt architecture
+Define:
+
+- interrupt sources;
+- interrupt state;
+- interrupt enable/disable behavior;
+- interrupt priority if architecturally visible;
+- interrupt delivery;
+- interrupt vectors;
+- interrupt context;
+- return-from-interrupt.
+Keep implementation-specific interrupt-controller hardware outside the ISA unless it is genuinely architecturally required.
+
+---
+
+# 14. Multicore architectural requirements
+Define only what software can observe.
+
+Do NOT design CPU cores or interconnects.
+
+Define the ISA-visible requirements for:
+
+- processor/core identity;
+- atomic synchronization;
+- inter-processor interrupts if supported;
+- memory visibility;
+- processor halt/wait;
+- startup of additional processors if architecturally required.
+Do not specify how the hardware physically connects the cores.
+
+---
+
+# 15. Virtualization architecture
+If virtualization is part of the Nova ISA, define only the **architectural interface**.
+
+Specify:
+
+- guest execution state;
+- host/hypervisor privilege;
+- guest traps;
+- guest memory translation;
+- virtual interrupts;
+- VM entry/exit;
+- virtualization exceptions.
+Do not design a specific hypervisor or CPU implementation.
+
+---
+
+# 16. Nova ABI foundation
+Define a preliminary software ABI based on the Nova ISA.
+
+Specify:
+
+- argument registers;
+- return registers;
+- caller-saved registers;
+- callee-saved registers;
+- stack pointer;
+- frame pointer if applicable;
+- return-address mechanism;
+- stack alignment;
+- calling convention;
+- system-call convention.
+Clearly label this as the **Nova ABI**.
+
+Do not borrow ARM/x86/RISC-V ABI terminology where it creates ambiguity.
+
+---
+
+# 17. Nova assembly language
+Define a canonical assembly syntax.
+
+For example:
+
+```
+ADD   r1, r2, r3
+SUB   r4, r4, #1
+LOAD  r5, [r6 + 16]
+STORE r5, [r6 + 16]
+BEQ   r1, r0, label
+CALL  function
+RET
+```
+These are examples only.
+
+Design the final Nova syntax consistently.
+
+Define:
+
+- register syntax;
+- immediates;
+- memory operands;
+- labels;
+- directives;
+- constants;
+- comments;
+- aliases;
+- pseudo-instructions.
+
+---
+
+# 18. Reference implementation
+Create a **Nova ISA reference emulator/interpreter**.
+
+The emulator should model the architectural state, not a hypothetical CPU microarchitecture.
+
+It must implement:
+
+- registers;
+- PC;
+- instruction fetch;
+- instruction decode;
+- instruction execution;
+- memory;
+- exceptions;
+- privilege state;
+- interrupts;
+- object/reference operations;
+- MMU behavior where practical.
+The execution model should conceptually be:
+
+```
+fetch
+  ↓
+decode
+  ↓
+validate
+  ↓
+execute
+  ↓
+update architectural state
+  ↓
+process architectural events
+  ↓
+next instruction
+```
+Do not simulate pipelines, caches, branch predictors, or other microarchitectural details.
+
+---
+
+# 19. Assembler
+Implement a Nova assembler capable of converting canonical Nova assembly into machine code.
+
+The assembler must use the authoritative Nova instruction definitions.
+
+Test:
+
+```
+assembly
+→ machine code
+```
+for every instruction.
+
+---
+
+# 20. Disassembler
+Implement a Nova disassembler capable of converting Nova machine code back into canonical assembly.
+
+Test:
+
+```
+machine code
+→ assembly
+```
+and ideally:
+
+```
+assembly
+→ machine code
+→ disassembly
+→ equivalent machine code
+```
+
+---
+
+# 21. Single source of truth
+Do NOT maintain separate manually duplicated instruction definitions for:
+
+- assembler;
+- disassembler;
+- emulator;
+- documentation.
+Create a centralized instruction-definition system where practical.
+
+For example:
+
+```
+instruction metadata
+        │
+ ┌──────┼─────────┐
+ ↓      ↓         ↓
+assembler emulator docs
+```
+This should minimize inconsistencies.
+
+---
+
+# 22. Testing
+Create automated tests covering:
+
+- every instruction;
+- every encoding;
+- register behavior;
+- immediate values;
+- signed/unsigned arithmetic;
+- memory operations;
+- branches;
+- calls/returns;
+- exceptions;
+- privilege violations;
+- atomic operations;
+- object/reference operations;
+- MMU behavior;
+- invalid encodings;
+- alignment faults.
+Include boundary cases.
+
+Do not only test happy paths.
+
+---
+
+# 23. Formal documentation
+Create a formal Nova ISA specification.
+
+At minimum provide documentation covering:
+
+```
+Nova overview
+Architectural state
+Registers
+Instruction encoding
+Instruction set
+Memory model
+Atomics
+Objects/references
+Exceptions
+Interrupts
+Privilege architecture
+Virtual memory
+Virtualization
+ABI
+Assembly syntax
+```
+Use concrete tables wherever possible.
+
+Bad:
+
+> Nova provides sophisticated memory management.
+Good:
+
+> A load from a virtual address whose translation is absent raises exception `X`, saves the faulting PC in register `Y`, and transfers control to the exception vector determined by `Z`.
+The specification should be useful to someone implementing Nova independently without needing to ask the original designer what a feature means.
+
+---
+
+# 24. Versioning
+Give the ISA an explicit version.
+
+For example:
+
+```
+Nova ISA v0.1
+```
+Use versioning to distinguish:
+
+- mandatory features;
+- optional extensions;
+- experimental features;
+- reserved encodings;
+- implementation-defined behavior.
+Do not silently change architectural semantics.
+
+---
+
+# 25. Repository inspection
+Before writing code:
+
+1. Inspect the entire existing repository.
+2. Find all existing Nova-related files.
+3. Read existing Nova documentation.
+4. Identify existing architectural decisions.
+5. Preserve useful existing work.
+6. Identify contradictions.
+7. Resolve contradictions explicitly.
+8. Do not overwrite unrelated projects.
+9. Do not invent that an existing feature exists when it does not.
+If an existing Nova prototype already exists, **formalize and extend it instead of replacing it blindly**.
+
+---
+
+# 26. Strict scope separation
+Maintain this separation:
+
+```
+NOVA ISA
+│
+├── architectural state
+├── instructions
+├── encodings
+├── memory model
+├── exceptions
+├── privilege
+├── MMU architecture
+├── object/reference architecture
+├── atomics
+├── interrupts
+├── virtualization
+└── ABI/assembly conventions
+```
+Outside the scope of this task:
+
+```
+Nova CPU products
+Nova CPU families
+Nova Päivää
+Nova Oryn
+pipeline designs
+cache designs
+branch predictors
+execution units
+physical hardware
+silicon
+clock frequencies
+manufacturing
+product segmentation
+```
+**Do not introduce any of those into the implementation.**
+
+---
+
+# 27. Final implementation report
+When finished, report:
+
+```
+Implemented:
+Partially implemented:
+Experimental:
+Not implemented:
+Architectural decisions made:
+ISA ambiguities discovered:
+Known limitations:
+Tests completed:
+Remaining work:
+```
+Be completely honest about the implementation status.
+
+**Do not call Nova "complete" merely because documentation exists.**
+
+The goal is a **real, concrete Nova ISA specification and reference implementation**, not a fictional CPU product line.

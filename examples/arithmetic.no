@@ -1,0 +1,12 @@
+; Example: arithmetic.no — integer arithmetic and immediate operations.
+;
+;   nova-as arithmetic.no
+;   nova-run arithmetic.no      -> halted; r3 == 51, r5 == 91, r6 == 90
+
+    MOVI r1, 3
+    MOVI r2, 17
+    MUL  r3, r1, r2     ; r3 = 3 * 17 = 51
+    MOVI r4, 40
+    ADD  r5, r3, r4     ; r5 = 51 + 40 = 91
+    SUBI r6, r5, 1      ; r6 = 91 - 1 = 90
+    HALT

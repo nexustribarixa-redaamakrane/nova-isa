@@ -1,0 +1,36 @@
+; Example: exceptions.no — install a trap handler for SCALL and service it.
+;
+;   nova-as exceptions.no
+;   nova-run exceptions.no      -> halted; r5 == 7 (ecode), r6 == 7 (ecause)
+;
+; Follows the Nova Trap ABI v0.1 conventions: the handler saves the two
+; registers it uses, publishes its result to a fixed rendezvous slot on the
+; stack, restores, and returns with MRET. Main reads the rendezvous after the
+; handler runs. sp is register 29 and stays 8-byte aligned.
+
+entry:
+    LI  sp, 0x3000          ; dedicated machine stack above the program
+    LA  r1, handler
+    CSRW vbar, r1           ; point the vector base at our handler
+    MOVI r2, 0
+    MOVI r3, 0
+    SCALL 7                 ; raise SYSTEM_CALL with cause 7 (epc = resume)
+
+resume:
+    LDD r5, [sp - 16]       ; handler's rendezvous: ecode
+    LDD r6, [sp - 8]        ; handler's rendezvous: ecause
+    HALT
+
+handler:
+    ; Entered at machine privilege with a frame on the exception save stack.
+    CSRR r16, ecode
+    CSRR r17, ecause
+    SUBI sp, sp, 32         ; 16-byte save area + 16-byte rendezvous area
+    STD  r16, [sp]          ; save the working registers
+    STD  r17, [sp + 8]
+    STD  r16, [sp + 16]     ; publish ecode for main
+    STD  r17, [sp + 24]     ; publish ecause for main
+    LDD  r17, [sp + 8]      ; restore the working registers
+    LDD  r16, [sp]
+    ADDI sp, sp, 32
+    MRET                    ; pop the frame; resume at `resume`

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nova-isa"
+version = "1.0.0"
+description = "Nova ISA v1.0 specification, reference implementation, and toolchain"
+requires-python = ">=3.11"
+
+[project.scripts]
+nova-as = "nova.cli:assemble_main"
+nova-ld = "nova.cli:link_main"
+nova-objdump = "nova.cli:objdump_main"
+nova-run = "nova.cli:run_main"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

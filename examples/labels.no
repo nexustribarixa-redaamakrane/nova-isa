@@ -1,0 +1,20 @@
+; Example: labels.no — labels, section-relative layout, and address math.
+;
+;   nova-as labels.no
+;   nova-run labels.no          -> halted; r3 == 12 (the data area size)
+;
+; LA loads the absolute link address of a label (labels are linked against
+; the image base, 0x1000 by default). The labeled region below is never
+; executed: HALT runs first. It acts as simple read-only data.
+
+    LA  r1, data_area       ; address of the first data word
+    LA  r2, end_label       ; one-past-the-end address
+    SUB r3, r2, r1          ; r3 = size of the data area in bytes
+    HALT
+
+data_area:
+    MOVI r4, 0              ; three words of "data"
+    MOVI r4, 0
+    MOVI r4, 0
+end_label:
+    MOVI r5, 0              ; unreachable; marks the end of the data area

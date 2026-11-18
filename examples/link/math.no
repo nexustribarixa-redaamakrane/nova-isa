@@ -1,0 +1,15 @@
+; Example: link/math.no — a small library unit for the multi-file linker demo.
+;
+;   nova-as -o math.nobj math.no
+;
+; Exports the square function and a one-word data table to other objects.
+
+        .global math_square
+        .global math_table
+
+math_square:
+        MUL r1, r1, r1   ; r1 = r1 * r1
+        RET
+
+math_table:
+        NOP              ; one word of writable scratch data (STW/LDW target)

@@ -1,0 +1,25 @@
+; Example: branches.no — conditional branches and a loop.
+;
+;   nova-as branches.no
+;   nova-run branches.no        -> halted; r3 == 11, r4 == 3
+;
+; Nova branches compare their two register operands directly; a union of
+; ALU/compare flags is not part of branch evaluation.
+
+    MOVI r1, 7
+    MOVI r2, 11
+    BGE  r1, r2, use_r1     ; 7 >= 11 is false, so fall through
+    MOV  r3, r2             ; r3 = 11 (the maximum)
+    BEQ  r0, r0, done       ; unconditional jump to done
+
+use_r1:
+    MOV  r3, r1
+
+done:
+    MOVI r4, 0              ; count from 0 up to 3
+    MOVI r5, 3
+loop:
+    ADDI r4, r4, 1
+    SUBI r5, r5, 1
+    BNE  r5, r0, loop       ; loop while r5 != 0
+    HALT

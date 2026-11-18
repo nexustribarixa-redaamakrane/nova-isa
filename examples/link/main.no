@@ -1,0 +1,20 @@
+; Example: link/main.no — the caller half of the multi-file linker demo.
+;
+;   nova-as -o main.nobj main.no     ; assemble both units
+;   nova-as -o math.nobj math.no
+;   nova-ld -o program.nob main.nobj math.nobj
+;   nova-run program.nob             -> halted cleanly, r1 == 9, r5 == 9, r6 == 0
+;
+; Calls across a file boundary (CALL math_square) and takes the absolute
+; address of a symbol defined in another object (LA r2, math_table).
+
+        .global _start
+
+_start:
+        LI r1, 3         ; argument: square 3
+        CALL math_square ; cross-object call (PCREL_DISP14 relocation)
+        LA r2, math_table ; cross-object address (LA64 relocation)
+        STW r1, [r2]     ; store the result into the other object's data word
+        LDW r5, [r2]     ; load it back
+        SUB r6, r5, r1   ; r6 = r5 - r1 == 0 proves the call returned
+        HALT

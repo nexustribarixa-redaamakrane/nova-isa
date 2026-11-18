@@ -1,0 +1,18 @@
+; Example: objects.no — experimental object handles: create, read, write, drop.
+;
+;   nova-as objects.no
+;   nova-run objects.no         -> halted; r2 != 0, r3 == 24, r5 == 40
+;
+; OBJ.CREATE rd, rs1 allocates a reference (rd) whose metadata size is rs1.
+; OBJ.GET reads the size; OBJ.SET writes it; OBJ.DROP destroys the object.
+; After DROP the reference is invalid and would fault OBJECT_FAULT on use.
+
+entry:
+    MOVI r1, 24             ; desired prototype size in bytes
+    OBJ.CREATE r2, r1       ; r2 = new object reference (>= 1)
+    OBJ.GET r3, r2          ; r3 = current size (24)
+    MOVI r4, 40
+    OBJ.SET r4, r2          ; size = rd (40), object = rs1 (reference r2)
+    OBJ.GET r5, r2          ; r5 = 40
+    OBJ.DROP r2             ; destroy the object; r2 is now invalid
+    HALT

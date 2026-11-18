@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: python-${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install the package and test runner
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pytest
+      - name: Run the test suite
+        run: python -m pytest -q
+      - name: Byte-compile every module
+        run: python -m compileall -q nova tests
+      - name: Check toolchain versions
+        run: |
+          nova-as --version
+          nova-ld --version
+          nova-objdump --version
+          nova-run --version
+      - name: Build and run the hello example end to end
+        run: |
+          nova-as examples/hello.no -o hello.nob
+          nova-objdump hello.nob
+          nova-run hello.nob
+      - name: Build a relocatable object end to end
+        run: |
+          nova-as examples/objects.no -o objects.nobj
+          python -c "import sys; sys.exit(0) if open('objects.nobj','rb').read(4) == b'NOBJ' else sys.exit(1)"
+      - name: Link a multi-file program and run it
+        run: |
+          nova-as -o main.nobj examples/link/main.no
+          nova-as -o math.nobj examples/link/math.no
+          nova-ld -o program.nob main.nobj math.nobj
+          nova-run program.nob
+          nova-run --dump-regs program.nob | grep -q "r1=0000000000000009"
