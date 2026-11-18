@@ -24,6 +24,7 @@ from .lexer import Token, TokenKind, lex
 MAX_INCLUDE_DEPTH = 200
 MAX_EXPANSION_DEPTH = 256
 MAX_COND_DEPTH = 256
+_PLACEMARKER = "\x00PM\x00"
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_]\w*$")
 _INT_TOKEN_RE = re.compile(r"^(0[xX][0-9A-Fa-f]+|0[bB][01]+|0[0-7]*|[1-9][0-9]*)([uUlL]*)$")
@@ -56,6 +57,7 @@ class PreprocessorOptions:
     include_paths: List[Path] = field(default_factory=list)
     system_include_paths: List[Path] = field(default_factory=list)
     defines: Dict[str, str] = field(default_factory=dict)
+    language: str = "nova-c11"  # documented initial mode; see _install_builtin_macros
 
 
 class Preprocessor:
@@ -73,6 +75,8 @@ class Preprocessor:
         # Default include context for top-level preprocessing.
         self._top_filename = filename
         self._top_directory = Path(directory) if directory is not None else Path.cwd()
+        # Logical source mapping stack for #line: list of (physical_line_base, logical_line_base, logical_file)
+        # managed per processed source in _process_source. Dynamic builtins use token locations.
 
     # ------------------------------------------------------------------
     # Public API
@@ -107,10 +111,30 @@ class Preprocessor:
     # ------------------------------------------------------------------
 
     def _install_builtin_macros(self) -> None:
-        # __STDC__ and __STDC_VERSION__ are intentionally not defined until a
-        # specific hosted/freestanding language mode is declared.
         # __FILE__ and __LINE__ are handled dynamically during expansion.
-        pass
+        # Built-in object-like macros depend on the selected documented language mode.
+        lang = getattr(self.options, "language", "nova-c11") or "nova-c11"
+        # Initial documented mode for Nova freestanding C frontend. We define
+        # __STDC__ to indicate a conforming implementation mode, but do not claim
+        # full ISO C library/hosted conformance. __STDC_VERSION__ is defined only
+        # for modes that explicitly select a C standard level.
+        if lang in ("nova-c11", "c11", "gnu11"):
+            self._define_builtin_int("__STDC__", 1)
+            self._define_builtin_int("__STDC_HOSTED__", 0)
+            if lang == "c11":
+                self._define_builtin_int("__STDC_VERSION__", 201112)
+        elif lang in ("c99", "gnu99"):
+            self._define_builtin_int("__STDC__", 1)
+            self._define_builtin_int("__STDC_HOSTED__", 0)
+            self._define_builtin_int("__STDC_VERSION__", 199901)
+        elif lang in ("c89", "c90"):
+            self._define_builtin_int("__STDC__", 1)
+        # Other/custom modes may choose not to predefine these macros.
+
+    def _define_builtin_int(self, name: str, value: int) -> None:
+        loc = SourceLocation("<builtin>", 1, 1)
+        tok = Token(TokenKind.INT, str(value), loc, number=value)
+        self.macros[name] = Macro(name=name, params=None, replacement=(tok,), definition_location=loc)
 
     def _install_initial_defines(self) -> None:
         for name, value in self.options.defines.items():
@@ -136,8 +160,35 @@ class Preprocessor:
         try:
             logical_lines = splice_lines(source, filename)
             output: List[Token] = []
-            for line_text, line_no, raw_had_directive in logical_lines:
-                self._process_logical_line(line_text, line_no, filename, directory, output, depth)
+            # Logical location state for this source: can be changed by #line.
+            logical_file = filename
+            line_override: Optional[Tuple[int, int]] = None  # (physical_line, logical_line)
+            for line_text, phys_line_no, raw_had_directive in logical_lines:
+                logical_line_no = phys_line_no
+                if line_override is not None:
+                    base_phys, base_logical = line_override
+                    logical_line_no = base_logical + (phys_line_no - base_phys)
+                self._process_logical_line(line_text, logical_line_no, logical_file, directory, output, depth,
+                                           phys_filename=filename)
+                # If directive changed mapping, update state (handled via return? easier: detect #line effect)
+                # _process_logical_line/_handle_directive may set pending override via attributes
+                if hasattr(self, "_pending_line_override"):
+                    override = getattr(self, "_pending_line_override")
+                    delattr(self, "_pending_line_override")
+                    if override is None:
+                        line_override = None
+                    else:
+                        # override applies starting at next line
+                        next_phys = phys_line_no + 1
+                        if len(override) == 3:
+                            line_override = (next_phys, override[0])
+                            logical_file = override[1]
+                        else:
+                            line_override = (next_phys, override[0])
+                            logical_file = override[1]
+                if hasattr(self, "_pending_logical_file"):
+                    logical_file = getattr(self, "_pending_logical_file")
+                    delattr(self, "_pending_logical_file")
             return output
         finally:
             self.include_stack.pop()
@@ -146,10 +197,12 @@ class Preprocessor:
         return all(frame.active for frame in self.cond_stack)
 
     def _process_logical_line(self, line_text: str, line_no: int, filename: str,
-                              directory: Path, output: List[Token], depth: int) -> None:
+                              directory: Path, output: List[Token], depth: int,
+                              phys_filename: Optional[str] = None) -> None:
         stripped_leading = line_text.lstrip(" \t\v\f")
         if stripped_leading.startswith("#"):
-            self._handle_directive(line_text, line_no, filename, directory, output, depth)
+            self._handle_directive(line_text, line_no, filename, directory, output, depth,
+                                   phys_filename=phys_filename)
             return
         if not self._current_active():
             return
@@ -164,7 +217,8 @@ class Preprocessor:
     # ------------------------------------------------------------------
 
     def _handle_directive(self, line_text: str, line_no: int, filename: str,
-                          directory: Path, output: List[Token], depth: int) -> None:
+                          directory: Path, output: List[Token], depth: int,
+                          phys_filename: Optional[str] = None) -> None:
         # Locate '#' after leading whitespace in the logical line.
         idx = 0
         while idx < len(line_text) and line_text[idx] in " \t\v\f":
@@ -218,7 +272,7 @@ class Preprocessor:
             return
         if name == "pragma":
             if active:
-                self._directive_pragma(arg_text, loc, filename, directory)
+                self._directive_pragma(arg_text, loc, phys_filename or filename, directory)
             return
         if name == "error":
             if active:
@@ -226,7 +280,8 @@ class Preprocessor:
                 raise CompileError.at(loc, msg or "#error")
             return
         if name == "line":
-            # Accepted as no-op for now (location control not modeled in token stream API).
+            if active:
+                self._directive_line(arg_text, loc)
             return
 
         if active:
@@ -378,9 +433,43 @@ class Preprocessor:
     def _directive_pragma(self, arg_text: str, loc: SourceLocation, filename: str, directory: Path) -> None:
         toks = _lex_fragment(arg_text, loc.file, loc.line)
         if len(toks) == 1 and toks[0].value == "once":
+            # pragma once applies to the physical file identity
             self.pragma_once.add(_norm_path_key(filename, directory))
             return
         # Unknown pragmas are ignored in this phase.
+
+    def _directive_line(self, arg_text: str, loc: SourceLocation) -> None:
+        toks = _lex_fragment(arg_text, loc.file, loc.line)
+        # Allow macro-expanded #line forms? preprocess arg tokens except in some cases;
+        # simple approach: expand non-directive macros in argument where appropriate.
+        # For now, try expanding if first token not INT/STRING forms that are obvious.
+        if toks and not (toks[0].kind == TokenKind.INT):
+            # attempt expansion
+            expanded = self._expand_tokens(toks, set(), 0)
+            if expanded:
+                toks = expanded
+        if not toks:
+            raise CompileError.at(loc, "invalid #line directive")
+        if toks[0].kind != TokenKind.INT or toks[0].number is None:
+            raise CompileError.at(loc, "line number expected in #line directive")
+        line_no = int(toks[0].number)
+        if line_no < 1:
+            raise CompileError.at(loc, "line number in #line directive must be positive")
+        new_file = loc.file
+        idx = 1
+        if idx < len(toks):
+            if toks[idx].kind != TokenKind.STRING:
+                # GNU may have extra flags; tolerate trailing integer flags after filename.
+                raise CompileError.at(loc, "filename or end of line expected in #line directive")
+            new_file = toks[idx].string or ""
+            idx += 1
+        # Ignore trailing flags (common extension) if they are integers/identifiers.
+        if idx < len(toks):
+            for t in toks[idx:]:
+                if t.kind not in (TokenKind.INT, TokenKind.IDENT, TokenKind.KEYWORD):
+                    raise CompileError.at(loc, "unexpected token in #line directive")
+        # Set override to apply starting at next logical line.
+        self._pending_line_override = (line_no, new_file)
 
     def _directive_include(self, arg_text: str, loc: SourceLocation, directory: Path,
                            output: List[Token], depth: int) -> None:
@@ -476,80 +565,147 @@ class Preprocessor:
     # Macro expansion
     # ------------------------------------------------------------------
 
-    def _expand_tokens(self, tokens: Sequence[Token], disabled: Set[str], depth: int) -> List[Token]:
-        if depth > MAX_EXPANSION_DEPTH:
-            if tokens:
-                raise CompileError.at(tokens[0].location, "macro expansion depth exceeded")
-            raise CompileError("macro expansion depth exceeded")
-        out: List[Token] = []
-        i = 0
-        n = len(tokens)
-        while i < n:
-            tok = tokens[i]
+    def _expand_tokens(self, tokens: Sequence[Token], disabled: Optional[Set[str]] = None, depth: int = 0) -> List[Token]:
+        """Fully macro-expand a token sequence.
+
+        Uses a hide-set (blue-paint) algorithm so that macros are not re-expanded
+        recursively and already-disabled names remain disabled during argument
+        prescan and rescanning. Rescanned replacement tokens are reinserted ahead
+        of the remaining input so function-like invocations formed across expansion
+        boundaries are recognized.
+        """
+        # Internal stream elements are (Token, hide_frozenset)
+        stream: List[Tuple[Token, frozenset]] = [(t, frozenset(disabled or ())) for t in tokens]
+        output: List[Token] = []
+        steps = 0
+        while stream:
+            steps += 1
+            if steps > 1000000:  # safety valve
+                raise CompileError.at(stream[0][0].location, "macro expansion did not terminate")
+            tok, hide = stream.pop(0)
             if tok.kind in (TokenKind.IDENT, TokenKind.KEYWORD):
-                # __FILE__ / __LINE__
+                # __FILE__ / __LINE__ are dynamic built-ins
                 if tok.value == "__FILE__":
-                    out.append(Token(TokenKind.STRING, '"' + _escape_c_string(tok.location.file) + '"',
-                                     tok.location, string=tok.location.file))
-                    i += 1
+                    s = tok.location.file
+                    output.append(Token(TokenKind.STRING, '"' + _escape_c_string(s) + '"', tok.location, string=s))
                     continue
                 if tok.value == "__LINE__":
                     val = tok.location.line
-                    out.append(Token(TokenKind.INT, str(val), tok.location, number=val))
-                    i += 1
+                    output.append(Token(TokenKind.INT, str(val), tok.location, number=val))
                     continue
                 macro = self.macros.get(tok.value)
-                if macro is None or tok.value in disabled:
-                    out.append(tok)
-                    i += 1
+                if macro is None or tok.value in hide:
+                    output.append(tok)
                     continue
                 if macro.is_function_like:
-                    # Function-like macro only expands if followed by '('
-                    j = i + 1
-                    # tokens list has no whitespace tokens, so next token is immediate
-                    if j >= n or tokens[j].value != "(":
-                        out.append(tok)
-                        i += 1
+                    # Only expand if next token in the (possibly rescanned) stream is '('
+                    if not stream or stream[0][0].value != "(":
+                        output.append(tok)
                         continue
-                    args, end = self._collect_macro_args(tokens, j, macro, tok.location)
-                    replaced = self._substitute_macro(macro, args, tok.location)
-                    # Rescan with this macro disabled in the rescanned result.
-                    rescanned = self._expand_tokens(replaced, disabled | {macro.name}, depth + 1)
-                    out.extend(rescanned)
-                    i = end
+                    args, consumed = self._collect_macro_args_stream(stream, macro, tok.location)
+                    # Prescan arguments with the invocation hide set (excluding macro name itself)
+                    prescanned_args = [self._prescan_argument(arg, hide) for arg in args]
+                    replaced = self._substitute_macro(macro, args, prescanned_args, tok.location)
+                    # Perform ## in substituted replacement before rescanning
+                    replaced = self._apply_token_pasting(replaced, tok.location)
+                    new_hide = hide | frozenset({macro.name})
+                    tagged = [(self._retag_token(t, new_hide), new_hide) for t in replaced]
+                    # Rescan by prepending; remaining stream already had '('..')' consumed
+                    stream = tagged + stream[consumed:]
                     continue
                 else:
-                    replaced = list(macro.replacement)
-                    replaced = _relocate_tokens(replaced, tok.location)
-                    rescanned = self._expand_tokens(replaced, disabled | {macro.name}, depth + 1)
-                    out.extend(rescanned)
-                    i += 1
+                    replaced = [_relocate_token(t, tok.location) for t in macro.replacement]
+                    replaced = self._apply_token_pasting(replaced, tok.location)
+                    new_hide = hide | frozenset({macro.name})
+                    tagged = [(self._retag_token(t, new_hide), new_hide) for t in replaced]
+                    stream = tagged + stream
                     continue
             else:
-                out.append(tok)
-                i += 1
-        # Apply token pasting (##) on the expanded output as an operator pass.
-        out = self._apply_token_pasting(out)
-        return out
+                output.append(tok)
+        return output
 
-    def _collect_macro_args(self, tokens: Sequence[Token], lparen_index: int,
-                            macro: Macro, loc: SourceLocation) -> Tuple[List[List[Token]], int]:
-        # lparen_index points at '('
-        i = lparen_index + 1
-        n = len(tokens)
+    def _prescan_argument(self, arg_tokens: List[Token], hide: frozenset) -> List[Token]:
+        if not arg_tokens:
+            return []
+        # Fully macro-expand argument tokens as if they formed the rest of the file,
+        # but in the hide-set context of the invocation site.
+        # Use a fresh expansion context carrying the invocation hide set.
+        stream: List[Tuple[Token, frozenset]] = [(t, hide) for t in arg_tokens]
+        # Reuse the same expansion engine logic by calling a helper on the stream.
+        return self._expand_stream(stream)
+
+    def _expand_stream(self, stream: List[Tuple[Token, frozenset]]) -> List[Token]:
+        output: List[Token] = []
+        steps = 0
+        while stream:
+            steps += 1
+            if steps > 1000000:
+                raise CompileError.at(stream[0][0].location, "macro expansion did not terminate")
+            tok, hide = stream.pop(0)
+            if tok.kind in (TokenKind.IDENT, TokenKind.KEYWORD):
+                if tok.value == "__FILE__":
+                    s = tok.location.file
+                    output.append(Token(TokenKind.STRING, '"' + _escape_c_string(s) + '"', tok.location, string=s))
+                    continue
+                if tok.value == "__LINE__":
+                    val = tok.location.line
+                    output.append(Token(TokenKind.INT, str(val), tok.location, number=val))
+                    continue
+                macro = self.macros.get(tok.value)
+                if macro is None or tok.value in hide:
+                    output.append(tok)
+                    continue
+                if macro.is_function_like:
+                    if not stream or stream[0][0].value != "(":
+                        output.append(tok)
+                        continue
+                    args, consumed = self._collect_macro_args_stream(stream, macro, tok.location)
+                    prescanned_args = [self._prescan_argument(arg, hide) for arg in args]
+                    replaced = self._substitute_macro(macro, args, prescanned_args, tok.location)
+                    replaced = self._apply_token_pasting(replaced, tok.location)
+                    new_hide = hide | frozenset({macro.name})
+                    tagged = [(self._retag_token(t, new_hide), new_hide) for t in replaced]
+                    stream = tagged + stream[consumed:]
+                    continue
+                else:
+                    replaced = [_relocate_token(t, tok.location) for t in macro.replacement]
+                    replaced = self._apply_token_pasting(replaced, tok.location)
+                    new_hide = hide | frozenset({macro.name})
+                    tagged = [(self._retag_token(t, new_hide), new_hide) for t in replaced]
+                    stream = tagged + stream
+                    continue
+            else:
+                output.append(tok)
+        return output
+
+    def _retag_token(self, tok: Token, hide: frozenset) -> Token:
+        # Hide set is tracked in the stream, not on Token objects for API compatibility.
+        return tok
+
+    @staticmethod
+    def _retag_token_static(tok: Token, hide: frozenset) -> Token:
+        return tok
+
+    def _collect_macro_args_stream(self, stream: List[Tuple[Token, frozenset]],
+                                   macro: Macro, loc: SourceLocation) -> Tuple[List[List[Token]], int]:
+        # stream[0] is expected to be '('
+        if not stream or stream[0][0].value != "(":
+            raise CompileError.at(loc, f"expected '(' in macro invocation of '{macro.name}'")
+        i = 1
+        n = len(stream)
         args: List[List[Token]] = []
         current: List[Token] = []
         paren_depth = 0
         # Handle zero-arg invocation: ()
-        if i < n and tokens[i].value == ")":
+        if i < n and stream[i][0].value == ")":
+            consumed = i + 1
             if len(macro.params or ()) == 0:
-                return [], i + 1
+                return [], consumed
             if macro.variadic and len(macro.params or ()) == 1:
-                # only __VA_ARGS__, may be empty
-                return [[]], i + 1
+                return [[]], consumed
             raise CompileError.at(loc, f"macro argument count mismatch for '{macro.name}'")
         while i < n:
-            tok = tokens[i]
+            tok = stream[i][0]
             if tok.value == "(":
                 paren_depth += 1
                 current.append(tok)
@@ -557,8 +713,13 @@ class Preprocessor:
                 continue
             if tok.value == ")" and paren_depth == 0:
                 args.append(current)
-                # validate count
                 self._validate_arg_count(macro, args, loc)
+                # Ensure varargs placeholder exists when needed
+                params = macro.params or ()
+                if macro.variadic:
+                    fixed = len(params) - 1
+                    if len(args) == fixed:
+                        args.append([])
                 return args, i + 1
             if tok.value == ")" and paren_depth > 0:
                 paren_depth -= 1
@@ -585,72 +746,89 @@ class Preprocessor:
             if len(args) < fixed:
                 raise CompileError.at(loc, f"macro argument count mismatch for '{macro.name}'")
             if len(args) == fixed:
-                # empty varargs allowed; represent as empty list (already the case if handled) but
-                # our collection puts fixed args then varargs - if only fixed provided, append empty vararg.
                 args.append([])
-            elif len(args) > fixed + 1:
-                # extra args merged into varargs by our collection logic; should not happen except if miscount
-                pass
-            # If len(args) == fixed+1 ok.
-            # Special case: fixed==0 and single arg collected may be vararg content (including empty via () handled earlier)
             return
         if len(args) != len(params):
             raise CompileError.at(loc, f"macro argument count mismatch for '{macro.name}'")
 
-    def _substitute_macro(self, macro: Macro, args: List[List[Token]], invoke_loc: SourceLocation) -> List[Token]:
-        params = list(macro.params or [])
-        param_map: Dict[str, List[Token]] = {}
+    def _substitute_macro(self, macro: Macro, raw_args: List[List[Token]],
+                          prescanned_args: List[List[Token]], invoke_loc: SourceLocation) -> List[Token]:
+        params = list(macro.params or ())
+        raw_map: Dict[str, List[Token]] = {}
+        expanded_map: Dict[str, List[Token]] = {}
         for idx, pname in enumerate(params):
-            param_map[pname] = list(args[idx]) if idx < len(args) else []
+            raw_map[pname] = list(raw_args[idx]) if idx < len(raw_args) else []
+            expanded_map[pname] = list(prescanned_args[idx]) if idx < len(prescanned_args) else []
         repl = list(macro.replacement)
         out: List[Token] = []
         i = 0
         n = len(repl)
         while i < n:
             tok = repl[i]
-            # Stringification: # param
+            # Stringification: # param uses raw (unexpanded) argument tokens.
             if tok.value == "#" and macro.is_function_like:
-                if i + 1 < n and repl[i + 1].value in param_map:
-                    arg_toks = param_map[repl[i + 1].value]
-                    s = _stringize_tokens(arg_toks)
-                    out.append(Token(TokenKind.STRING, '"' + _escape_c_string(s) + '"', invoke_loc, string=s))
+                if i + 1 < n and repl[i + 1].value in raw_map:
+                    escaped, decoded = _stringize_tokens(raw_map[repl[i + 1].value])
+                    out.append(Token(TokenKind.STRING, '"' + escaped + '"', invoke_loc, string=decoded))
                     i += 2
                     continue
-                else:
-                    raise CompileError.at(invoke_loc, "'#' is not followed by a macro parameter")
-            # Parameter substitution (with awareness of ## so operands not prematurely expanded per standard rules;
-            # simplified but practical: expand args unless adjacent to ##)
-            if tok.value in param_map and macro.is_function_like:
-                arg_toks = param_map[tok.value]
-                # Determine if this parameter is operand of ##
+                raise CompileError.at(invoke_loc, "'#' is not followed by a macro parameter")
+
+            # GNU extension: , ## __VA_ARGS__ (or named variadic parameter).
+            # If varargs is empty, elide comma and ##. If non-empty, keep comma and
+            # insert varargs tokens (do not token-paste comma with first vararg token).
+            if (tok.value == "," and i + 2 < n and repl[i + 1].value == "##"
+                    and macro.is_function_like and macro.variadic):
+                va_name = repl[i + 2].value
+                if va_name in raw_map and va_name == params[-1]:
+                    va_raw = raw_map[va_name]
+                    if len(va_raw) == 0:
+                        i += 3
+                        continue
+                    else:
+                        out.append(_relocate_token(tok, invoke_loc))  # comma
+                        out.extend(_relocate_tokens(va_raw, invoke_loc))
+                        i += 3
+                        continue
+
+            if tok.value in raw_map and macro.is_function_like:
                 adjacent_paste = (i > 0 and repl[i - 1].value == "##") or (i + 1 < n and repl[i + 1].value == "##")
                 if adjacent_paste:
-                    # Insert raw argument tokens (no prior expansion)
-                    out.extend(_relocate_tokens(arg_toks, invoke_loc))
+                    raw = raw_map[tok.value]
+                    if len(raw) == 0:
+                        out.append(Token(TokenKind.PUNCT, _PLACEMARKER, invoke_loc))
+                    else:
+                        out.extend(_relocate_tokens(raw, invoke_loc))
                 else:
-                    # Expand argument tokens first, then substitute
-                    expanded_arg = self._expand_tokens(arg_toks, set(), 0)
-                    out.extend(_relocate_tokens(expanded_arg, invoke_loc))
+                    out.extend(_relocate_tokens(expanded_map[tok.value], invoke_loc))
                 i += 1
                 continue
             out.append(_relocate_token(tok, invoke_loc))
             i += 1
         return out
 
-    def _apply_token_pasting(self, tokens: List[Token]) -> List[Token]:
-        # Repeatedly merge A ## B into a single pasted preprocessing token.
-        changed = True
+    def _apply_token_pasting(self, tokens: List[Token], loc: Optional[SourceLocation] = None) -> List[Token]:
+        """Apply ## in a substituted replacement list before rescanning."""
+        def is_pm(t: Token) -> bool:
+            return t.value == _PLACEMARKER
+
         out = list(tokens)
-        while changed:
-            changed = False
-            i = 0
-            new_out: List[Token] = []
-            while i < len(out):
-                if i + 1 < len(out) and out[i + 1].value == "##":
-                    if i + 2 >= len(out):
-                        raise CompileError.at(out[i + 1].location, "'##' cannot appear at end of macro expansion")
-                    left = out[i]
-                    right = out[i + 2]
+        i = 0
+        while i < len(out):
+            # Look for 'left ## right' starting at i
+            if i + 1 < len(out) and out[i + 1].value == "##":
+                if i + 2 >= len(out):
+                    lloc = out[i + 1].location if i + 1 < len(out) else (loc or (out[i].location if out else SourceLocation()))
+                    raise CompileError.at(lloc, "'##' cannot appear at end of macro expansion")
+                left = out[i]
+                right = out[i + 2]
+                if is_pm(left) and is_pm(right):
+                    result = left
+                elif is_pm(left):
+                    result = right
+                elif is_pm(right):
+                    result = left
+                else:
                     pasted_text = left.value + right.value
                     try:
                         pasted_toks = _lex_fragment(pasted_text, left.location.file, left.location.line)
@@ -659,16 +837,15 @@ class Preprocessor:
                     if len(pasted_toks) != 1:
                         raise CompileError.at(out[i + 1].location, f"token pasting produced an invalid token '{pasted_text}'")
                     pt = pasted_toks[0]
-                    new_out.append(Token(pt.kind, pt.value, left.location, number=pt.number, string=pt.string))
-                    i += 3
-                    changed = True
-                    continue
-                if out[i].value == "##":
-                    # leading ## or leftover - invalid
-                    raise CompileError.at(out[i].location, "'##' cannot appear here in macro expansion")
-                new_out.append(out[i])
-                i += 1
-            out = new_out
+                    result = Token(pt.kind, pt.value, left.location, number=pt.number, string=pt.string, leading_space=left.leading_space)
+                # Replace left,##,right with result and recheck at i for chained ##.
+                out[i:i + 3] = [result]
+                continue
+            if out[i].value == "##":
+                raise CompileError.at(out[i].location, "'##' cannot appear here in macro expansion")
+            i += 1
+        # Remove any placemarkers that remain (not adjacent to ##)
+        out = [t for t in out if not is_pm(t)]
         return out
 
     # ------------------------------------------------------------------
@@ -679,7 +856,6 @@ class Preprocessor:
         toks = _lex_fragment(expr_text, loc.file, loc.line)
         if not toks:
             raise CompileError.at(loc, "expected expression in conditional directive")
-        # Replace 'defined' and perform macro expansion (identifiers not macros -> 0)
         toks = self._expand_if_tokens(toks, loc)
         parser = _IfExprParser(toks, loc)
         value = parser.parse_expression()
@@ -687,15 +863,14 @@ class Preprocessor:
             raise CompileError.at(parser.peek().location, "unexpected token in conditional expression")
         return 1 if value else 0 if isinstance(value, bool) else int(value)
 
-
     def _expand_if_tokens(self, tokens: Sequence[Token], loc: SourceLocation) -> List[Token]:
+        # Process 'defined', then macro-expand, then convert remaining identifiers to 0.
         out: List[Token] = []
         i = 0
         n = len(tokens)
         while i < n:
             tok = tokens[i]
             if tok.kind in (TokenKind.IDENT, TokenKind.KEYWORD) and tok.value == "defined":
-                # defined NAME or defined(NAME)
                 j = i + 1
                 has_paren = False
                 if j < n and tokens[j].value == "(":
@@ -713,33 +888,21 @@ class Preprocessor:
                 out.append(Token(TokenKind.INT, str(val), tok.location, number=val))
                 i = j
                 continue
-            if tok.kind in (TokenKind.IDENT, TokenKind.KEYWORD):
-                # true/false? no; expand macros except special. In #if, remaining identifiers become 0.
-                macro = self.macros.get(tok.value)
-                if macro is not None and not macro.is_function_like:
-                    expanded = self._expand_if_tokens(_relocate_tokens(list(macro.replacement), tok.location), loc)
-                    out.extend(expanded)
-                    i += 1
-                    continue
-                elif macro is not None and macro.is_function_like:
-                    # function-like macro in #if: attempt expansion only if invocation; else 0
-                    if i + 1 < n and tokens[i + 1].value == "(":
-                        args, end = self._collect_macro_args(tokens, i + 1, macro, tok.location)
-                        replaced = self._substitute_macro(macro, args, tok.location)
-                        out.extend(self._expand_if_tokens(replaced, loc))
-                        i = end
-                        continue
-                    out.append(Token(TokenKind.INT, "0", tok.location, number=0))
-                    i += 1
-                    continue
-                else:
-                    out.append(Token(TokenKind.INT, "0", tok.location, number=0))
-                    i += 1
-                    continue
             out.append(tok)
             i += 1
-        return out
-
+        try:
+            expanded = self._expand_tokens(out, set(), 0)
+        except CompileError:
+            expanded = out
+        final: List[Token] = []
+        for t in expanded:
+            if t.kind == TokenKind.IDENT:
+                final.append(Token(TokenKind.INT, "0", t.location, number=0))
+            elif t.kind == TokenKind.KEYWORD:
+                final.append(Token(TokenKind.INT, "0", t.location, number=0))
+            else:
+                final.append(t)
+        return final
 
 class _IfExprParser:
     """Integer constant expression parser for #if/#elif."""
@@ -967,14 +1130,14 @@ def _lex_fragment(text: str, filename: str, line: int) -> List[Token]:
         if t.kind == TokenKind.EOF:
             continue
         out.append(Token(t.kind, t.value, SourceLocation(filename, line, t.location.column),
-                         number=t.number, string=t.string))
+                         number=t.number, string=t.string, leading_space=t.leading_space))
     return out
 
 
 def _relocate_token(tok: Token, loc: SourceLocation) -> Token:
     # Preserve macro invocation location for diagnostics/expansion context; keep column 1 as coarse info.
     return Token(tok.kind, tok.value, SourceLocation(loc.file, loc.line, tok.location.column if tok.location.file == loc.file else 1),
-                 number=tok.number, string=tok.string)
+                 number=tok.number, string=tok.string, leading_space=tok.leading_space)
 
 
 def _relocate_tokens(tokens: Sequence[Token], loc: SourceLocation) -> List[Token]:
@@ -1004,38 +1167,38 @@ def _escape_c_string(s: str) -> str:
     return "".join(out)
 
 
-def _stringize_tokens(tokens: Sequence[Token]) -> str:
-    # Concatenate token spellings. Original whitespace is not preserved by the
-    # lexer, so we insert spaces only where needed to keep tokens distinct/readable.
+def _stringize_tokens(tokens: Sequence[Token]) -> Tuple[str, str]:
+    """Stringize argument tokens per C rules.
+
+    Returns (escaped_content, decoded_content):
+      - escaped_content: suitable for embedding inside a C string literal token
+        (quotes and backslashes escaped as \\\" and \\\\).
+      - decoded_content: the actual string value (what the program would see).
+    """
     if not tokens:
-        return ""
-    parts: List[str] = []
-    prev: Optional[Token] = None
-    for tok in tokens:
-        if prev is not None and _needs_stringize_space(prev, tok):
-            parts.append(" ")
-        parts.append(tok.value)
-        prev = tok
-    return "".join(parts)
-
-
-def _needs_stringize_space(prev: Token, cur: Token) -> bool:
-    if prev.kind in (TokenKind.IDENT, TokenKind.KEYWORD, TokenKind.INT) and cur.kind in (TokenKind.IDENT, TokenKind.KEYWORD, TokenKind.INT):
-        return True
-    if prev.kind in (TokenKind.IDENT, TokenKind.KEYWORD, TokenKind.INT) and cur.kind in (TokenKind.STRING, TokenKind.CHAR):
-        return True
-    if prev.kind in (TokenKind.STRING, TokenKind.CHAR) and cur.kind in (TokenKind.IDENT, TokenKind.KEYWORD, TokenKind.INT, TokenKind.STRING, TokenKind.CHAR):
-        return True
-    # Prevent accidental token merging such as + + or / * in stringized text.
-    if prev.kind == TokenKind.PUNCT and cur.kind == TokenKind.PUNCT:
-        if prev.value + cur.value in {"++", "--", "##", "->", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||",
-                                      "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "<<=", ">>=", "...", "/*", "//"}:
-            return False
-        # Adjacent identical punctuators that would merge visually into a different token.
-        if prev.value == cur.value and prev.value in {"+", "-", "&", "|", "<", ">", "=", "/", "*", "%", "^", "!", ".", ":"}:
-            return True
-        return False
-    return False
+        return "", ""
+    escaped_parts: List[str] = []
+    decoded_parts: List[str] = []
+    for i, tok in enumerate(tokens):
+        space = " " if (i > 0 and getattr(tok, "leading_space", False)) else ""
+        if space:
+            escaped_parts.append(" ")
+            decoded_parts.append(" ")
+        spelling = tok.value
+        if tok.kind == TokenKind.STRING:
+            # Argument token spelling includes surrounding quotes, e.g. "hi".
+            # In the stringized result, the quote characters and any backslashes
+            # in the token must be escaped.
+            escaped_parts.append(spelling.replace("\\", "\\\\").replace('"', '\\"'))
+            decoded_parts.append(spelling)
+        elif tok.kind == TokenKind.CHAR:
+            escaped_parts.append(spelling.replace("\\", "\\\\").replace('"', '\\"'))
+            decoded_parts.append(spelling)
+        else:
+            # Identifiers, keywords, numbers, punctuators: no " or \ in spellings.
+            escaped_parts.append(spelling)
+            decoded_parts.append(spelling)
+    return "".join(escaped_parts), "".join(decoded_parts)
 
 
 def _macros_identical(a: Macro, b: Macro) -> bool:
@@ -1117,11 +1280,13 @@ def _needs_space(prev: Token, cur: Token) -> bool:
 def preprocess(source: str, filename: str = "<stdin>", *, directory: Optional[str | Path] = None,
                include_paths: Optional[Sequence[str | Path]] = None,
                system_include_paths: Optional[Sequence[str | Path]] = None,
-               defines: Optional[Dict[str, str]] = None) -> str:
+               defines: Optional[Dict[str, str]] = None,
+               language: str = "nova-c11") -> str:
     opts = PreprocessorOptions(
         include_paths=[Path(p) for p in (include_paths or [])],
         system_include_paths=[Path(p) for p in (system_include_paths or [])],
         defines=dict(defines or {}),
+        language=language,
     )
     pp = Preprocessor(filename=filename, directory=Path(directory) if directory else None, options=opts)
     return pp.preprocess(source, filename=filename, directory=directory)
@@ -1130,11 +1295,13 @@ def preprocess(source: str, filename: str = "<stdin>", *, directory: Optional[st
 def preprocess_to_tokens(source: str, filename: str = "<stdin>", *, directory: Optional[str | Path] = None,
                          include_paths: Optional[Sequence[str | Path]] = None,
                          system_include_paths: Optional[Sequence[str | Path]] = None,
-                         defines: Optional[Dict[str, str]] = None) -> List[Token]:
+                         defines: Optional[Dict[str, str]] = None,
+                         language: str = "nova-c11") -> List[Token]:
     opts = PreprocessorOptions(
         include_paths=[Path(p) for p in (include_paths or [])],
         system_include_paths=[Path(p) for p in (system_include_paths or [])],
         defines=dict(defines or {}),
+        language=language,
     )
     pp = Preprocessor(filename=filename, directory=Path(directory) if directory else None, options=opts)
     return pp.preprocess_to_tokens(source, filename=filename, directory=directory)

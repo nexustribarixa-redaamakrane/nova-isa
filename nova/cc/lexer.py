@@ -35,6 +35,10 @@ class Token:
     number: Optional[int] = None
     # For STRING, decoded bytes/text payload without surrounding quotes.
     string: Optional[str] = None
+    # True if whitespace/comments preceded this token in the source (used for
+    # preprocessing/stringification). First token may have leading whitespace in
+    # source but this is still set when skipped.
+    leading_space: bool = False
 
     def __repr__(self) -> str:
         extra = ""
@@ -159,21 +163,21 @@ class _Lexer:
     def lex(self) -> List[Token]:
         tokens: List[Token] = []
         while True:
-            self._skip_space_and_comments()
+            had_space = self._skip_space_and_comments()
             if self.i >= self.length:
-                tokens.append(Token(TokenKind.EOF, "", self._loc()))
+                tokens.append(Token(TokenKind.EOF, "", self._loc(), leading_space=had_space))
                 return tokens
             ch = self.source[self.i]
             if _is_ident_start(ch):
-                tokens.append(self._ident_or_keyword())
+                tokens.append(self._ident_or_keyword(leading_space=had_space))
             elif ch.isdigit() or (ch == "." and self._peek_digit()):
-                tokens.append(self._number())
+                tokens.append(self._number(leading_space=had_space))
             elif ch == "'":
-                tokens.append(self._char())
+                tokens.append(self._char(leading_space=had_space))
             elif ch == '"':
-                tokens.append(self._string())
+                tokens.append(self._string(leading_space=had_space))
             else:
-                punct = self._punctuator()
+                punct = self._punctuator(leading_space=had_space)
                 if punct is None:
                     raise CompileError.at(self._loc(), f"unexpected character {ch!r}")
                 tokens.append(punct)
@@ -205,16 +209,19 @@ class _Lexer:
                 self.column += 1
         return "".join(out)
 
-    def _skip_space_and_comments(self) -> None:
+    def _skip_space_and_comments(self) -> bool:
+        skipped = False
         while self.i < self.length:
             ch = self.source[self.i]
             if ch in " \t\n\v\f":
                 self._advance()
+                skipped = True
                 continue
             if ch == "/" and self._peek(1) == "/":
                 self._advance(2)
                 while self.i < self.length and self.source[self.i] != "\n":
                     self._advance()
+                skipped = True
                 continue
             if ch == "/" and self._peek(1) == "*":
                 start = self._loc()
@@ -228,19 +235,21 @@ class _Lexer:
                     self._advance()
                 if not closed:
                     raise CompileError.at(start, "unterminated block comment")
+                skipped = True
                 continue
             break
+        return skipped
 
-    def _ident_or_keyword(self) -> Token:
+    def _ident_or_keyword(self, leading_space: bool = False) -> Token:
         start = self._loc()
         chars = [self._advance()]
         while self.i < self.length and _is_ident_continue(self.source[self.i]):
             chars.append(self._advance())
         text = "".join(chars)
         kind = TokenKind.KEYWORD if text in KEYWORDS else TokenKind.IDENT
-        return Token(kind, text, start)
+        return Token(kind, text, start, leading_space=leading_space)
 
-    def _number(self) -> Token:
+    def _number(self, leading_space: bool = False) -> Token:
         # Integer constants for Phase 1 (decimal, octal, hex). A leading '.'
         # followed by digit is reserved for floats and diagnosed clearly.
         start = self._loc()
@@ -298,7 +307,7 @@ class _Lexer:
         # Reject float suffixes/exponents encountered after an integer.
         if self.i < self.length and self.source[self.i] in ".eEpP":
             raise CompileError.at(start, "floating-point constants are not supported")
-        return Token(TokenKind.INT, full, start, number=number)
+        return Token(TokenKind.INT, full, start, number=number, leading_space=leading_space)
 
     def _index_of(self, loc: SourceLocation) -> int:
         # Not used; retained only to avoid accidental attribute errors.
@@ -319,7 +328,7 @@ class _Lexer:
                                   f"invalid integer suffix {s!r}")
         return s
 
-    def _char(self) -> Token:
+    def _char(self, leading_space: bool = False) -> Token:
         start = self._loc()
         self._advance()  # opening '
         if self.i >= self.length or self.source[self.i] == "\n":
@@ -338,7 +347,7 @@ class _Lexer:
         self._advance()  # closing '
         # Use the first character's numeric value.
         first_value = self._first_char_value(raw, start)
-        return Token(TokenKind.CHAR, "'" + raw + "'", start, number=first_value)
+        return Token(TokenKind.CHAR, "'" + raw + "'", start, number=first_value, leading_space=leading_space)
 
     def _first_char_value(self, raw: str, start: SourceLocation) -> int:
         # Decode just the first character/escape of a raw char payload.
@@ -346,7 +355,7 @@ class _Lexer:
         val = sub.read_one()
         return val
 
-    def _string(self) -> Token:
+    def _string(self, leading_space: bool = False) -> Token:
         start = self._loc()
         self._advance()  # opening "
         chars: List[str] = []
@@ -356,7 +365,7 @@ class _Lexer:
             if ch == '"':
                 self._advance()
                 decoded = "".join(chars)
-                return Token(TokenKind.STRING, '"' + "".join(raw_parts) + '"', start, string=decoded)
+                return Token(TokenKind.STRING, '"' + "".join(raw_parts) + '"', start, string=decoded, leading_space=leading_space)
             if ch == "\n":
                 raise CompileError.at(start, "unterminated string literal")
             val, raw = self._read_c_char(stop='"', context="string literal", start=start)
@@ -398,12 +407,12 @@ class _Lexer:
             self._advance()
             return ord(ch), ch
 
-    def _punctuator(self) -> Optional[Token]:
+    def _punctuator(self, leading_space: bool = False) -> Optional[Token]:
         start = self._loc()
         for punct in PUNCTUATORS:
             if self.source.startswith(punct, self.i):
                 self._advance(len(punct))
-                return Token(TokenKind.PUNCT, punct, start)
+                return Token(TokenKind.PUNCT, punct, start, leading_space=leading_space)
         return None
 
 

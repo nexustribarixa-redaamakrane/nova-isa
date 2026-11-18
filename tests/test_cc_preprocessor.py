@@ -395,3 +395,361 @@ def test_error_directive_active():
 def test_error_directive_inactive_not_triggered():
     out = pp("#if 0\n#error boom\n#endif\nint ok = 1;\n")
     assert "ok" in out and "#error" not in out
+
+
+# ---------------------------------------------------------------------------
+# Part A hardening: macro expansion correctness
+# ---------------------------------------------------------------------------
+
+def test_macro_prescan_argument_expansion():
+    src = """
+    #define ID(x) x
+    #define ADD(a,b) ID(a) + ID(b)
+    #define ONE 1
+    #define TWO 2
+    ADD(ONE, TWO);
+    """
+    assert norm_ws(pp(src)) == norm_ws("1+2;")
+
+
+def test_macro_prescan_disabled_during_rescan_of_replacement():
+    src = """
+    #define f(a) a*g
+    #define g(a) f(a)
+    f(2)(9)
+    """
+    assert norm_ws(pp(src)) == norm_ws("2*f(9)")
+
+
+def test_direct_recursive_expansion_object_like_hardening():
+    src = """
+    #define A A
+    A
+    """
+    assert norm_ws(pp(src)) == norm_ws("A")
+
+
+def test_indirect_recursive_expansion_three_macros():
+    src = """
+    #define A B
+    #define B C
+    #define C A
+    A
+    """
+    assert norm_ws(pp(src)) == norm_ws("A")
+
+
+def test_nested_function_like_macros():
+    src = """
+    #define INC(x) ((x)+1)
+    #define DBL(x) ((x)*2)
+    DBL(INC(3))
+    """
+    assert norm_ws(pp(src)) == norm_ws("((((3)+1))*2)")
+
+
+def test_function_like_invocation_formed_across_expanded_tokens():
+    src = """
+    #define f(x) x+1
+    #define g f
+    #define apply(m) m(1)
+    apply(g)
+    """
+    assert norm_ws(pp(src)) == norm_ws("1+1")
+
+
+def test_function_like_invocation_formed_by_rescanning_with_following_tokens():
+    src = """
+    #define F(x) x
+    #define CALL F
+    CALL(42)
+    """
+    assert norm_ws(pp(src)) == norm_ws("42")
+
+
+def test_no_expansion_without_parens_for_function_like_macro():
+    src = """
+    #define F(x) x
+    F;
+    F (7);
+    """
+    out = norm_ws(pp(src))
+    assert "F;" in out.replace(" ", "")
+    assert "7" in out
+
+
+def test_stringification_whitespace_normalization_hardening():
+    src = r"""
+    #define S(x) #x
+    S(a    +    b)
+    """
+    toks = pp_tokens(src)
+    assert len(toks) == 1 and toks[0].kind is TokenKind.STRING
+    assert toks[0].string == "a + b"
+
+
+def test_stringification_trims_leading_trailing_whitespace():
+    src = r"""
+    #define S(x) #x
+    S(   hello world   )
+    """
+    toks = pp_tokens(src)
+    assert toks[0].string == "hello world"
+
+
+def test_stringification_adjacent_tokens_no_space():
+    src = r"""
+    #define S(x) #x
+    S(a+b)
+    """
+    toks = pp_tokens(src)
+    assert toks[0].string == "a+b"
+
+
+def test_stringification_escapes_quotes_and_backslashes():
+    src = '#define S(x) #x\nS("hi")\n'
+    toks = pp_tokens(src)
+    assert toks[0].kind is TokenKind.STRING
+    assert toks[0].string == '"hi"'
+    assert toks[0].value == '"\\"hi\\""'
+
+
+def test_stringification_raw_argument_not_expanded():
+    src = """
+    #define A 100
+    #define S(x) #x
+    S(A)
+    """
+    toks = pp_tokens(src)
+    assert toks[0].string == "A"
+
+
+def test_token_pasting_identifiers_hardening():
+    src = """
+    #define CAT(a,b) a ## b
+    int CAT(foo, bar) = 1;
+    """
+    toks = pp_tokens(src)
+    assert "foobar" in values(toks)
+
+
+def test_token_pasting_numbers():
+    src = """
+    #define CAT(a,b) a ## b
+    int x = CAT(12, 34);
+    """
+    toks = pp_tokens(src)
+    assert "1234" in values(toks)
+
+
+def test_token_pasting_punctuators():
+    src = """
+    #define MK(a,b) a ## b
+    MK(+, =)
+    """
+    toks = pp_tokens(src)
+    assert "+=" in values(toks)
+
+
+def test_token_pasting_multiple_consecutive():
+    src = """
+    #define CAT3(a,b,c) a ## b ## c
+    CAT3(1,2,3)
+    """
+    toks = pp_tokens(src)
+    assert "123" in values(toks)
+
+
+def test_token_pasting_empty_arg_placemarker_left():
+    src = """
+    #define CAT(a,b) a ## b
+    CAT(,foo)
+    """
+    assert norm_ws(pp(src)) == norm_ws("foo")
+
+
+def test_token_pasting_empty_arg_placemarker_right():
+    src = """
+    #define CAT(a,b) a ## b
+    CAT(foo,)
+    """
+    assert norm_ws(pp(src)) == norm_ws("foo")
+
+
+def test_token_pasting_invalid_diagnosed_extra():
+    src = """
+    #define BAD(a,b) a ## b
+    BAD(@, b)
+    """
+    with pytest.raises(CompileError):
+        pp(src)
+
+
+def test_variadic_empty_argument_hardening():
+    src = """
+    #define LOG(fmt, ...) fmt __VA_ARGS__
+    LOG("hi",)
+    """
+    toks = pp_tokens(src)
+    assert toks[0].kind is TokenKind.STRING and toks[0].string == "hi"
+
+
+def test_variadic_multiple_arguments():
+    src = """
+    #define F(x, ...) x __VA_ARGS__
+    F(1, 2, 3, 4)
+    """
+    out = values(pp_tokens(src))
+    assert out[0] == "1"
+    assert "2" in out and "3" in out and "4" in out
+
+
+def test_variadic_nested_parentheses_in_args():
+    src = """
+    #define F(x, ...) __VA_ARGS__
+    F(0, (1,2), (3,(4,5)))
+    """
+    out = norm_ws(pp(src))
+    assert "(1,2)" in out.replace(" ", "")
+
+
+def test_variadic_stringification_of_va_args():
+    src = r"""
+    #define S(...) #__VA_ARGS__
+    S(a, b, c)
+    """
+    toks = pp_tokens(src)
+    assert toks[0].kind is TokenKind.STRING
+    assert "a" in toks[0].string and "b" in toks[0].string
+
+
+def test_variadic_token_pasting_with_va_args():
+    src = """
+    #define MAKE(name, ...) int name ## _impl(__VA_ARGS__)
+    MAKE(foo, 1, 2)
+    """
+    out = values(pp_tokens(src))
+    assert "foo_impl" in out
+
+
+def test_gnu_comma_paste_elision_extension_empty():
+    src = '#define F(fmt, ...) printf(fmt, ## __VA_ARGS__)\nF("x")\n'
+    assert norm_ws(pp(src)) == norm_ws('printf("x")')
+
+
+def test_gnu_comma_paste_elision_extension_nonempty():
+    src = '#define F(fmt, ...) printf(fmt, ## __VA_ARGS__)\nF("x", 1)\n'
+    out = norm_ws(pp(src))
+    assert 'printf' in out and '"x"' in out and '1' in out
+
+
+# ---------------------------------------------------------------------------
+# #line and built-ins
+# ---------------------------------------------------------------------------
+
+def test_line_directive_sets_line_number():
+    src = '#line 200\n__LINE__\n'
+    toks = pp_tokens(src)
+    assert toks[0].kind is TokenKind.INT and toks[0].number == 200
+
+
+def test_line_directive_sets_line_and_file():
+    src = '#line 42 "other.c"\n__LINE__\n__FILE__\n'
+    toks = pp_tokens(src)
+    assert toks[0].number == 42
+    assert toks[1].kind is TokenKind.STRING and toks[1].string == "other.c"
+
+
+def test_line_directive_propagates_to_subsequent_lines():
+    src = '#line 10 "x.c"\n__LINE__\n__LINE__\n'
+    toks = pp_tokens(src)
+    assert toks[0].number == 10
+    assert toks[1].number == 11
+
+
+def test_builtin_stdc_defined_in_default_mode():
+    toks = pp_tokens("__STDC__\n")
+    assert toks[0].kind is TokenKind.INT and toks[0].number == 1
+
+
+def test_builtin_stdc_hosted_defined_in_default_mode():
+    toks = pp_tokens("__STDC_HOSTED__\n")
+    assert toks[0].kind is TokenKind.INT and toks[0].number == 0
+
+
+def test_builtin_stdc_version_in_c11_mode():
+    toks = pp_tokens("__STDC_VERSION__\n", language="c11")
+    assert toks[0].kind is TokenKind.INT and toks[0].number == 201112
+
+
+def test_builtin_stdc_version_in_c99_mode():
+    toks = pp_tokens("__STDC_VERSION__\n", language="c99")
+    assert toks[0].kind is TokenKind.INT and toks[0].number == 199901
+
+
+# ---------------------------------------------------------------------------
+# Directives, includes, conditionals
+# ---------------------------------------------------------------------------
+
+def test_traditional_include_guard(tmp_path):
+    (tmp_path / "guard.h").write_text(
+        "#ifndef GUARD_H\n#define GUARD_H\nint guarded;\n#endif\n", encoding="utf-8")
+    src = '#include "guard.h"\n#include "guard.h"\n'
+    out = values(pp_tokens(src, directory=str(tmp_path)))
+    assert out.count("guarded") == 1
+
+
+def test_computed_include_string_form(tmp_path):
+    (tmp_path / "a.h").write_text("int a;\n", encoding="utf-8")
+    src = '#define H "a.h"\n#include H\n'
+    out = values(pp_tokens(src, directory=str(tmp_path)))
+    assert "a" in out
+
+
+def test_include_missing_file_diagnostic(tmp_path):
+    src = '#include "no_such_file.h"\n'
+    with pytest.raises(CompileError):
+        pp(src, directory=str(tmp_path))
+
+
+def test_conditional_nesting_hardening():
+    src = """
+    #define A 1
+    #if A
+      #if 0
+        int bad;
+      #else
+        int good;
+      #endif
+    #endif
+    """
+    out = values(pp_tokens(src))
+    assert "good" in out and "bad" not in out
+
+
+def test_conditional_unterminated_diagnostic_hardening():
+    src = """
+    #if 1
+    int x;
+    """
+    with pytest.raises(CompileError):
+        pp(src)
+
+
+def test_error_directive_reports_location():
+    src = """
+    #error boom
+    """
+    with pytest.raises(CompileError) as excinfo:
+        pp(src, filename="err.c")
+    assert "boom" in str(excinfo.value)
+
+
+def test_unknown_pragma_ignored_hardening():
+    src = """
+    #pragma something_unknown
+    int x;
+    """
+    out = values(pp_tokens(src))
+    assert "x" in out
+
