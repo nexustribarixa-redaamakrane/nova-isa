@@ -38,7 +38,7 @@ _start:
 """
 
 #: Assembler pseudos the lowerer is allowed to emit.
-ALLOWED_PSEUDOS = {"LI", "LA"}
+ALLOWED_PSEUDOS = {"LI", "LA", "BL"}
 
 #: Object-frontend directives the lowerer is allowed to emit.
 ALLOWED_DIRECTIVES = {
@@ -615,3 +615,46 @@ def test_non_constant_global_initializer_is_rejected():
     with pytest.raises(CompileError) as exc:
         compile_source("int f(void) { return 1; } int x = f();")
     assert "non-constant data initializer" in exc.value.message
+
+
+def test_long_calls_use_documented_la_and_bl_pseudos():
+    tree = analyze(parse_source(
+        "int g(void) { return 7; } int f(void) { return g(); }",
+        filename="long.c",
+    ))
+    asm = generate(tree, long_calls=True)
+    assert "CALL g" not in asm
+    assert "BL g" in asm
+    assert re.search(r"^LA ra, \.Lcgu_longcall_\d+$", asm, re.MULTILINE)
+    obj = assemble_object(asm)
+    kinds = {relocation.kind for relocation in obj.relocations}
+    assert "PCREL_LONG" in kinds
+    assert kinds <= {"PCREL_DISP14", "PCREL_LONG", "LA64", "ABS64"}
+
+
+def test_long_branches_use_documented_bl_pseudo_and_still_execute():
+    asm = generate(
+        analyze(parse_source(
+            """
+            int main(void) {
+                int total = 0;
+                for (int i = 0; i < 5; i++) {
+                    if (i == 2) continue;
+                    total += i;
+                }
+                return total;
+            }
+            """,
+            filename="longbranch.c",
+        )),
+        long_branches=True,
+    )
+    # Unconditional jumps and conditionals use the BL pseudo; the short-form
+    # guaranteed-true branch is gone.
+    assert "BEQ r0, r0, .Lcgu_" not in asm
+    assert "BL .Lcgu_" in asm
+    obj = assemble_object(asm)
+    assert {relocation.kind for relocation in obj.relocations} <= \
+        {"PCREL_DISP14", "PCREL_LONG", "LA64", "ABS64"}
+    assert run_program(asm) == 8
+

@@ -151,6 +151,9 @@ def _instruction_length(line: str) -> int:
     if mnemonic == "LA":
         # assemble_object gives every symbolic LA a maximal fixed-width block.
         return MAX_LI_LENGTH
+    if mnemonic == "BL":
+        # assemble_object gives every symbolic BL a maximal LI plus one JMP.
+        return MAX_LI_LENGTH + 1
     if mnemonic == "LI":
         operands = parts[1].split(",") if len(parts) == 2 else []
         if len(operands) == 2:
@@ -228,9 +231,12 @@ class _DataObject:
 class CodeGenerator:
     """Direct AST-to-Nova64-assembly lowering pass."""
 
-    def __init__(self, tree: ast.TranslationUnit, target: str = "nova64"):
+    def __init__(self, tree: ast.TranslationUnit, target: str = "nova64",
+                 long_calls: bool = False, long_branches: bool = False):
         self.tree = tree
         self.target = target
+        self.long_calls = long_calls
+        self.long_branches = long_branches
         # Resolved lazily so ``generate`` can diagnose an unanalysed tree with
         # a source-located compile error instead of an AttributeError.
         self.ctx: Optional[TypeContext] = getattr(tree, "type_context", None)
@@ -357,9 +363,37 @@ class CodeGenerator:
         ``JMP`` takes a register, so a guaranteed-true ``BEQ`` against ``r0``
         is the canonical real-instruction branch to an assembly label.  It uses
         the existing ``PCREL_DISP14`` relocation and needs no extra scratch
-        register.
+        register.  In long-branch mode the documented ``BL`` pseudo removes the
+        signed 14-bit displacement limit.
         """
-        self._emit(f"BEQ r0, r0, {label}")
+        if self.long_branches:
+            self._emit(f"BL {label}")
+        else:
+            self._emit(f"BEQ r0, r0, {label}")
+
+    _BRANCH_INVERSIONS = {
+        "BEQ": "BNE",
+        "BNE": "BEQ",
+        "BLT": "BGE",
+        "BGE": "BLT",
+        "BLE": "BGT",
+        "BGT": "BLE",
+        "BLTU": "BGEU",
+        "BGEU": "BLTU",
+        "BLEU": "BGTU",
+        "BGTU": "BLEU",
+    }
+
+    def _emit_branch(self, mnemonic: str, operands: str, label: str) -> None:
+        """Emit a conditional branch, optionally without a range limit."""
+        if not self.long_branches:
+            self._emit(f"{mnemonic} {operands}, {label}")
+            return
+        skip = self._new_label("branch_skip")
+        inverse = self._BRANCH_INVERSIONS[mnemonic]
+        self._emit(f"{inverse} {operands}, {skip}")
+        self._emit(f"BL {label}")
+        self._emit_label(skip)
 
     def _emit_li(self, reg: str, value: int) -> None:
         self._emit(f"LI {reg}, {int(value) & WORD_MASK}")
@@ -563,7 +597,7 @@ class CodeGenerator:
         self._load_slot(src, "t0")
         if isinstance(target0, BoolType):
             true_label, end_label = self._new_label("bool_true"), self._new_label("bool_end")
-            self._emit(f"BNE t0, r0, {true_label}")
+            self._emit_branch("BNE", "t0, r0", true_label)
             self._emit("MOVI t0, 0")
             self._emit_jump(end_label)
             self._emit_label(true_label)
@@ -849,7 +883,7 @@ class CodeGenerator:
             true_label, end_label = (self._new_label("not_true"),
                                      self._new_label("not_end"))
             self._load_slot(operand.slot, "t0")
-            self._emit(f"BNE t0, r0, {true_label}")
+            self._emit_branch("BNE", "t0, r0", true_label)
             self._emit("MOVI t0, 1")
             self._emit_jump(end_label)
             self._emit_label(true_label)
@@ -914,7 +948,7 @@ class CodeGenerator:
             raise _unsupported(node, f"comparison operator '{op}'")
         self._load_slot(left, "t0")
         self._load_slot(right, "t1")
-        self._emit(f"{mnemonic} t0, t1, {true_label}")
+        self._emit_branch(mnemonic, "t0, t1", true_label)
 
     def _gen_binary(self, expr: ast.BinaryExpression) -> ExprResult:
         op = expr.op
@@ -1233,7 +1267,19 @@ class CodeGenerator:
 
         sym = getattr(expr.callee, "symbol", None)
         if isinstance(expr.callee, ast.IdentifierExpression) and sym is not None and sym.kind == "function":
-            self._emit(f"CALL {self._label_for(sym)}")
+            target = self._label_for(sym)
+            if self.long_calls:
+                # ``CALL`` encodes a signed 14-bit PC-relative displacement.
+                # Materialise the return address and use the assembler's
+                # documented ``BL`` long-jump pseudo so the call is independent
+                # of the final linked distance. No ISA surface is added: ``BL``
+                # expands to LI r15/JMP r15 and ``LA`` to LI.
+                return_label = self._new_label("longcall")
+                self._emit(f"LA ra, {return_label}")
+                self._emit(f"BL {target}")
+                self._emit_label(return_label)
+            else:
+                self._emit(f"CALL {target}")
         else:
             callee = self._gen_rvalue(expr.callee)
             return_label = self._new_label("funcret")
@@ -1299,7 +1345,7 @@ class CodeGenerator:
         if not (types.is_scalar_type(value.type) or _is_pointer(value.type)):
             raise _unsupported(expr, "non-scalar condition")
         self._load_slot(value.slot, "t0")
-        self._emit(f"BNE t0, r0, {true_label}")
+        self._emit_branch("BNE", "t0, r0", true_label)
         self._emit_jump(false_label)
 
     # -- function bodies -----------------------------------------------------
@@ -1661,7 +1707,7 @@ class CodeGenerator:
                 raise _unsupported(value_expr, "non-constant case label")
             self._load_slot(condition.slot, "t0")
             self._emit_li("t1", value)
-            self._emit(f"BEQ t0, t1, {label}")
+            self._emit_branch("BEQ", "t0, t1", label)
         self._emit_jump(default_label)
 
         self.break_stack.append(end_label)
@@ -1924,6 +1970,19 @@ class CodeGenerator:
         return None
 
 
-def generate(tree: ast.TranslationUnit, target: str = "nova64") -> str:
-    """Lower a semantically analysed translation unit to Nova64 assembly."""
-    return CodeGenerator(tree, target).generate()
+def generate(tree: ast.TranslationUnit, target: str = "nova64",
+             long_calls: bool = False, long_branches: bool = False) -> str:
+    """Lower a semantically analysed translation unit to Nova64 assembly.
+
+    ``long_calls`` replaces direct ``CALL`` instructions with a return-address
+    ``LA`` plus the assembler's documented ``BL`` pseudo-instruction. The
+    resulting sequence is position-independent of the final linked layout and
+    removes the signed 14-bit call displacement limit at the cost of code size.
+
+    ``long_branches`` replaces direct intra-function branches with an inverted
+    short branch around the same documented ``BL`` pseudo-instruction, so no
+    single function is limited by the signed 14-bit ``PCREL_DISP14`` range.
+    Both options are opt-in: default code stays compact and range-limited.
+    """
+    return CodeGenerator(tree, target, long_calls=long_calls,
+                         long_branches=long_branches).generate()
