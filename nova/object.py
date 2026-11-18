@@ -95,6 +95,7 @@ __all__ = [
     "Relocation",
     "SECTION_KIND_BY_NAME",
     "SECTION_FLAG_BITS",
+    "SYMBOL_TYPE_BY_NAME",
     "Section",
     "Symbol",
     "decode_object",
@@ -105,8 +106,10 @@ __all__ = [
 
 #: Four ASCII magic bytes at offset 0.
 NOBJ_MAGIC = b"NOBJ"
-#: Current container version at offset 4.
-NOBJ_VERSION = 1
+#: Current container version at offset 4. Version 1 is still decoded; version 2
+#: adds a symbol type and size field to each symbol record.
+NOBJ_VERSION = 2
+NOBJ_VERSION_V1 = 1
 #: Total header size in bytes.
 NOBJ_HEADER_SIZE = 32
 
@@ -157,6 +160,17 @@ BINDING_BY_NAME: Mapping[str, int] = {
     "global": 1,
 }
 BINDING_BY_BYTE = {v: k for k, v in BINDING_BY_NAME.items()}
+
+#: Symbol types carried by objects from version 2 onward. ``notype`` is the
+#: default for v1 objects and for labels with no declared type.
+SYMBOL_TYPE_BY_NAME: Mapping[str, int] = {
+    "notype": 0,
+    "object": 1,
+    "function": 2,
+    "section": 3,
+    "file": 4,
+}
+SYMBOL_TYPE_BY_BYTE = {v: k for k, v in SYMBOL_TYPE_BY_NAME.items()}
 
 _UNDEFINED_SECTION = 0xFFFFFFFF
 _MAX_NAME_BYTES = 255
@@ -219,6 +233,8 @@ class Symbol:
     binding: str
     section: int | None
     value: int = 0
+    type: str = "notype"
+    size: int = 0
 
     @property
     def is_defined(self) -> bool:
@@ -324,6 +340,10 @@ def _check_symbol(symbol: Symbol, section_count: int,
     seen_names.add(symbol.name)
     if symbol.binding not in BINDING_BY_NAME:
         raise ObjectError(f"unsupported symbol binding {symbol.binding!r}")
+    if symbol.type not in SYMBOL_TYPE_BY_NAME:
+        raise ObjectError(f"unsupported symbol type {symbol.type!r}")
+    if not isinstance(symbol.size, int) or symbol.size < 0:
+        raise ObjectError(f"symbol {symbol.name!r} has a negative size")
     if symbol.section is None:
         if symbol.binding != "global":
             raise ObjectError(
@@ -439,6 +459,9 @@ def encode_object(obj: ObjectFile) -> bytes:
         payload += bytes((BINDING_BY_NAME[symbol.binding],))
         payload += _u(section_index, 4)
         payload += _u(symbol.value, 8)
+        # Version 2 symbol metadata: one type byte and an eight-byte size.
+        payload += bytes((SYMBOL_TYPE_BY_NAME[symbol.type],))
+        payload += _u(symbol.size, 8)
 
     for relocation in obj.relocations:
         payload += _u(relocation.section, 4)
@@ -505,7 +528,7 @@ def decode_object(data: bytes | bytearray | memoryview) -> ObjectFile:
     if blob[:4] != NOBJ_MAGIC:
         raise ObjectError(f"bad .nobj magic: {blob[:4]!r}; expected {NOBJ_MAGIC!r}")
     version = int.from_bytes(blob[4:6], "little")
-    if version != NOBJ_VERSION:
+    if version not in (NOBJ_VERSION_V1, NOBJ_VERSION):
         raise ObjectError(
             f"unsupported .nobj version {version}; expected {NOBJ_VERSION}"
         )
@@ -556,12 +579,25 @@ def decode_object(data: bytes | bytearray | memoryview) -> ObjectFile:
         binding = BINDING_BY_BYTE[binding_byte]
         section_index = cursor.u(4, "symbol section index")
         value = cursor.u(8, "symbol value")
+        if version == NOBJ_VERSION:
+            type_byte = cursor.take(1, "symbol type")[0]
+            if type_byte not in SYMBOL_TYPE_BY_BYTE:
+                raise ObjectError(f"symbol {name!r} has unknown type byte {type_byte}")
+            symbol_type = SYMBOL_TYPE_BY_BYTE[type_byte]
+            size = cursor.u(8, "symbol size")
+        else:
+            # Version 1 records carried no metadata; defaults keep old files
+            # readable without changing their meaning.
+            symbol_type = "notype"
+            size = 0
         symbols.append(
             Symbol(
                 name=name,
                 binding=binding,
                 section=None if section_index == _UNDEFINED_SECTION else section_index,
                 value=value,
+                type=symbol_type,
+                size=size,
             )
         )
 

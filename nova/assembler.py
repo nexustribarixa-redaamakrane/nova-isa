@@ -52,7 +52,7 @@ converges after at most a few passes and a stable image is always produced.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .isa import (
@@ -69,7 +69,7 @@ from .isa import (
     WORD_MASK,
     zero_extend,
 )
-from .object import ObjectFile, Relocation, Section, Symbol
+from .object import ObjectFile, Relocation, Section, Symbol, SYMBOL_TYPE_BY_NAME
 
 __all__ = [
     "AssemblyError",
@@ -401,14 +401,16 @@ def _asciz_bytes(token: str, line_number: int) -> bytes:
     return bytes(out)
 
 
-def _parse_object_entries(source: str) -> Tuple[Sequence[object], List[str], List[str]]:
+def _parse_object_entries(
+        source: str) -> Tuple[Sequence[object], List[str], List[str], Dict[str, Dict[str, object]]]:
     """Parse object-frontend source into instruction/directive entries.
 
-    Returns ``(entries, globals_order, trailing)`` where ``entries`` is a list
+    Returns ``(entries, globals_order, trailing, symbol_meta)`` where ``entries`` is a list
     of :class:`ParsedStatement` and :class:`ParsedDirective` in source order,
     ``globals_order`` the ordered list of ``.global``/``.globl`` names, and
-    ``trailing`` the labels defined after the last content line. A
-    ``.global``/``.globl``/``.section`` line may not carry a label; every
+    ``trailing`` the labels defined after the last content line, and
+    ``symbol_meta`` a per-symbol map of ``.type``/``.size`` values. A
+    ``.global``/``.globl``/``.section``/``.type``/``.size`` line may not carry a label; every
     other directive and every instruction takes the labels defined on its
     line. Statement and directive line numbers are preserved for diagnostics.
     """
@@ -419,6 +421,7 @@ def _parse_object_entries(source: str) -> Tuple[Sequence[object], List[str], Lis
     globals_seen: set[str] = set()
     seen: Dict[str, int] = {}
     pending: List[str] = []
+    symbol_meta: Dict[str, Dict[str, object]] = {}
     for line_number, raw in enumerate(source.splitlines(), start=1):
         line = _strip_comment(raw).strip()
         if not line:
@@ -475,6 +478,44 @@ def _parse_object_entries(source: str) -> Tuple[Sequence[object], List[str], Lis
                 ParsedDirective(line_number, directive, tuple(operands), ())
             )
             continue
+        if directive in (".type", ".size"):
+            if pending:
+                raise AssemblyError(
+                    f"{directive} cannot carry a label", line_number
+                )
+            operands = _split_object_operands(rest, line_number)
+            if len(operands) != 2:
+                raise AssemblyError(
+                    f"{directive} requires exactly two operands", line_number
+                )
+            name = operands[0]
+            if not _LABEL_RE.fullmatch(name):
+                raise AssemblyError(
+                    f"malformed {directive} symbol {name!r}", line_number
+                )
+            meta = symbol_meta.setdefault(name, {"line": line_number})
+            if directive == ".type":
+                symbol_type = operands[1].lower().lstrip("@%")
+                if symbol_type not in SYMBOL_TYPE_BY_NAME:
+                    known = ", ".join(sorted(SYMBOL_TYPE_BY_NAME))
+                    raise AssemblyError(
+                        f"unknown symbol type {operands[1]!r}; expected one of {known}",
+                        line_number,
+                    )
+                meta["type"] = symbol_type
+            else:
+                try:
+                    size = parse_integer(operands[1], line_number)
+                except AssemblyError:
+                    raise AssemblyError(
+                        f".size operand {operands[1]!r} is not an integer", line_number
+                    ) from None
+                if size < 0:
+                    raise AssemblyError(
+                        ".size cannot be negative", line_number
+                    )
+                meta["size"] = size
+            continue
         if directive not in _DATA_DIRECTIVES:
             raise AssemblyError(
                 f"directive {directive!r} is not defined by {ISA_VERSION} in "
@@ -490,7 +531,7 @@ def _parse_object_entries(source: str) -> Tuple[Sequence[object], List[str], Lis
                             tuple(pending))
         )
         pending = []
-    return entries, globals_order, pending
+    return entries, globals_order, pending, symbol_meta
 
 
 # --------------------------------------------------------------------------
@@ -793,7 +834,7 @@ def assemble_object(source: str) -> ObjectFile:
     """
     from .pseudo import MAX_LI_LENGTH, expand_pseudo, li_maximal  # local import avoids a cycle
 
-    entries, globals_order, trailing = _parse_object_entries(source)
+    entries, globals_order, trailing, symbol_meta = _parse_object_entries(source)
     global_set: set[str] = set(globals_order)
 
     # Section order: .text is always section 0; other sections follow in
@@ -1027,6 +1068,17 @@ def assemble_object(source: str) -> ObjectFile:
             symbols.append(Symbol(name=name, binding="global", section=None, value=0))
 
     symbol_index = {symbol.name: index for index, symbol in enumerate(symbols)}
+    for name, meta in symbol_meta.items():
+        if name not in symbol_index:
+            raise AssemblyError(
+                f".type/.size name {name!r} is not a defined symbol",
+                int(meta["line"]),
+            )
+        updates = {
+            key: value for key, value in meta.items() if key != "line"
+        }
+        index = symbol_index[name]
+        symbols[index] = replace(symbols[index], **updates)
     relocations = [
         Relocation(section=sec, offset=item_offset, kind=kind,
                    symbol=symbol_index[name], addend=0)

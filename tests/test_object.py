@@ -16,6 +16,7 @@ from nova.object import (
     NOBJ_HEADER_SIZE,
     NOBJ_MAGIC,
     NOBJ_VERSION,
+    NOBJ_VERSION_V1,
     RELOCATION_SPAN_BYTES,
     ObjectError,
     ObjectFile,
@@ -233,7 +234,7 @@ def test_bad_magic_is_rejected():
 
 def test_unsupported_version_and_flags_rejected():
     blob = _raw(sample_object())
-    blob[4:6] = (2).to_bytes(2, "little")
+    blob[4:6] = (3).to_bytes(2, "little")
     with pytest.raises(ObjectError, match="version"):
         decode_object(bytes(blob))
     blob = _raw(sample_object())
@@ -472,3 +473,68 @@ def test_nobj_registry_publishes_implemented_object_format():
     assert fmt.kind == "object"
     assert fmt.implemented
     assert fmt.magic == NOBJ_MAGIC
+
+
+# --------------------------------------------------------------------------
+# Symbol metadata (object format v2)
+# --------------------------------------------------------------------------
+
+
+def test_symbol_type_and_size_survive_assembly_and_round_trip():
+    obj = assemble_object("""
+.global _start
+.type _start, function
+_start:
+    NOP
+.size _start, 4
+start_label:
+    NOP
+.type start_label, @object
+.size start_label, 4
+""")
+    symbols = {symbol.name: symbol for symbol in obj.symbols}
+    assert symbols["_start"].type == "function"
+    assert symbols["_start"].size == 4
+    assert symbols["start_label"].type == "object"
+    assert symbols["start_label"].size == 4
+
+    decoded = decode_object(encode_object(obj))
+    restored = {symbol.name: symbol for symbol in decoded.symbols}
+    assert restored["_start"].type == "function"
+    assert restored["_start"].size == 4
+
+
+def test_v1_objects_still_decode_with_default_symbol_metadata():
+    blob = bytearray()
+    blob += NOBJ_MAGIC
+    blob += NOBJ_VERSION_V1.to_bytes(2, "little")
+    blob += (0).to_bytes(2, "little")
+    blob += (1).to_bytes(8, "little")  # sections
+    blob += (1).to_bytes(8, "little")  # symbols
+    blob += (0).to_bytes(8, "little")  # relocations
+    blob += bytes(NOBJ_HEADER_SIZE - len(blob))
+    blob += (1).to_bytes(4, "little") + b"t"
+    blob += bytes((0, 2, 2, 0))  # progbits, exec, 4-byte alignment
+    blob += (4).to_bytes(4, "little") + b"\x00\x00\x00\x00"
+    blob += (1).to_bytes(4, "little") + b"s"
+    blob += bytes((0,)) + (0).to_bytes(4, "little") + (0).to_bytes(8, "little")
+
+    decoded = decode_object(bytes(blob))
+    assert decoded.symbols[0].type == "notype"
+    assert decoded.symbols[0].size == 0
+
+
+@pytest.mark.parametrize(
+    "source,message",
+    [
+        (".type foo, dragon\nfoo:\n  NOP\n", "unknown symbol type"),
+        (".size foo, -1\nfoo:\n  NOP\n", "cannot be negative"),
+        (".size foo, banana\nfoo:\n  NOP\n", "not an integer"),
+        (".type foo function\nfoo:\n  NOP\n", "exactly two operands"),
+        ("foo: .type foo, function\n", "cannot carry a label"),
+        (".type missing, function\n", "not a defined symbol"),
+    ],
+)
+def test_symbol_metadata_directives_reject_bad_input(source, message):
+    with pytest.raises(AssemblyError, match=message):
+        assemble_object(source)

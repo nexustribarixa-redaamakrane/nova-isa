@@ -531,9 +531,9 @@ These suffixes are registered format names, published as `nova.FILE_FORMATS`; `n
 
 `.noo`, `.nod`, `.nok`, and the other container names are host-independent Nova format identifiers: they are not native Windows PE/COFF, ELF, or Mach-O files and are not directly loadable by an operating system loader. The `.nok`, `.nod`, and other container magic values are reserved identifiers; their complete binary layouts, compatibility rules, relocation records, signing, and loader semantics are outside this specification.
 
-### 17.1 Relocatable objects (.nobj) v1
+### 17.1 Relocatable objects (.nobj) v2
 
-`nova-as` produces a relocatable object when the output name ends in `.nobj` (only the output name selects the mode). The format version is `NOBJ_VERSION` 1 and the byte layout is little-endian. The container begins with a 32-byte header (magic `NOBJ`, version, flags, and three record counts) followed by section, symbol, and relocation records.
+`nova-as` produces a relocatable object when the output name ends in `.nobj` (only the output name selects the mode). The current format version is `NOBJ_VERSION` 2; version 1 files remain readable and decode with default symbol metadata. The byte layout is little-endian. The container begins with a 32-byte header (magic `NOBJ`, version, flags, and three record counts) followed by section, symbol, and relocation records. Version 2 adds a one-byte symbol type and an eight-byte symbol size to each symbol record; types are `notype` (0), `object` (1), `function` (2), `section` (3), and `file` (4).
 
 - **Sections.** A name, a kind (`progbits` carrying image bytes, `nobits` carrying no bytes), flags (`alloc`, `exec`, `write`, `read`), an alignment power of two, and a size.
 - **Symbols.** A name, binding (`local` or `global`), a section index (`0xFFFFFFFF` for an undefined external), and a value that is the symbol's offset within its section.
