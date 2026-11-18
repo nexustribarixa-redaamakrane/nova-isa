@@ -108,7 +108,7 @@ from .fileformats import (
 
 #: Version of the user-facing toolchain scripts (``nova-as``, ``nova-objdump``,
 #: ``nova-run``). Keep it in step with ``pyproject.toml``; the CLI tests check.
-TOOLCHAIN_VERSION = "1.0.0"
+TOOLCHAIN_VERSION = "1.1.0"
 
 #: The documented software contract between Nova code and its runtime: the
 #: procedure-calling convention, system-call convention, and exception-handler

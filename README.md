@@ -491,7 +491,7 @@ nova-run: halted after 17 step(s) at pc 0x1038, privilege machine
 
 Exit codes are stable across the tools: `0` success (for `nova-run`, the machine halted); `1` an input/assembly/container/run error; `2` a usage error (for `nova-run`, the step budget being reached). Diagnostics go to standard error with no tracebacks.
 
-The toolchain version is separate from the ISA revision: `nova.TOOLCHAIN_VERSION` is `1.0.0`, the `.nob` container format is `NOB_VERSION` 1, and the software conventions are `nova.TRAP_ABI_VERSION`, "Nova ABI v1.0".
+The toolchain version is separate from the ISA revision: `nova.TOOLCHAIN_VERSION` is `1.1.0`, the `.nob` container format is `NOB_VERSION` 1, and the software conventions are `nova.TRAP_ABI_VERSION`, "Nova ABI v1.0". Toolchain release `1.0.0` is the snapshot at commit `6ccc28b` (INITIAL COMMIT); `1.1.0` adds the standard syscall ABI, the compiler backend plan, and stage-2 virtualization.
 
 ### 16.4 Examples
 
