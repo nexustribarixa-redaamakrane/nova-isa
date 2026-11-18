@@ -6,6 +6,9 @@ the compiler is built. It is kept in sync with `docs/PORTING_READINESS.md`.
 
 The ISA remains frozen at `Nova ISA v1.0`. Phase 1 adds software only.
 
+**Current progress:** Steps 1 and 2 are complete (lexer/diagnostics and
+preprocessor with tests). Next milestone: Step 3 — AST and parser.
+
 ## 1. Pipeline
 
 ```
@@ -137,21 +140,58 @@ operating-system interface is the existing standard syscall table.
 
 ## 6. Implementation order and gates
 
-| Step | Deliverable | Gate |
-| --- | --- | --- |
-| 1 | Architecture plan, package skeleton, lexer, diagnostics | Lexer tests pass |
-| 2 | Preprocessor (includes, object/function macros, conditionals) | Preprocessor tests pass |
-| 3 | AST + parser | Parser tests pass |
-| 4 | Type system + semantic analysis | Sema tests pass |
-| 5 | Codegen: arithmetic, locals, return, first end-to-end program | `nova-run` executes a C program |
-| 6 | Calls, recursion, globals, ABI tests | Recursive fib runs |
-| 7 | Control flow (`if`, loops, `switch`) | Loop/switch tests pass |
-| 8 | Pointers, arrays, strings, structs, enums, typedefs | Pointer/struct tests pass |
-| 9 | libnova headers and functions | libnova tests pass |
-| 10 | `nova-cc` CLI, `-c`/`-S`/`-E`, multi-TU linking | CLI tests pass |
-| 11 | Documentation and readiness update | Full suite green |
+| Step | Deliverable | Gate | Status |
+| --- | --- | --- | --- |
+| 1 | Architecture plan, package skeleton, lexer, diagnostics | Lexer tests pass | **Complete** (`d559f99`, `e439de2`) |
+| 2 | Preprocessor (includes, object/function macros, conditionals) | Preprocessor tests pass | **Complete** (this milestone) |
+| 3 | AST + parser | Parser tests pass | Pending |
+| 4 | Type system + semantic analysis | Sema tests pass | Pending |
+| 5 | Codegen: arithmetic, locals, return, first end-to-end program | `nova-run` executes a C program | Pending |
+| 6 | Calls, recursion, globals, ABI tests | Recursive fib runs | Pending |
+| 7 | Control flow (`if`, loops, `switch`) | Loop/switch tests pass | Pending |
+| 8 | Pointers, arrays, strings, structs, enums, typedefs | Pointer/struct tests pass | Pending |
+| 9 | libnova headers and functions | libnova tests pass | Pending |
+| 10 | `nova-cc` CLI, `-c`/`-S`/`-E`, multi-TU linking | CLI tests pass | Pending |
+| 11 | Documentation and readiness update | Full suite green | Pending |
 
 Each step is committed separately after its tests pass.
+
+### Step 2 implementation notes (preprocessor)
+
+- **Pipeline/API:** `nova.cc.preprocessor` provides `Preprocessor`, `preprocess(...)`
+  (text output for future `nova-cc -E`) and `preprocess_to_tokens(...)` (token
+  stream for the parser). Public exports are available from `nova.cc`.
+- **Line processing:** backslash-newline splicing, logical-line directive handling,
+  comment handling via lexer tokenization, and source locations preserved at logical
+  line granularity (expanded tokens are attributed to invocation/active locations).
+- **Macros:** object-like and function-like macros, parameter parsing with nested
+  parentheses, argument substitution, `#undef`, identical redefinition accepted and
+  incompatible redefinition diagnosed, recursive expansion prevention, expansion
+  depth limits.
+- **Operators:** stringification (`#`) and token pasting (`##`) implemented; token
+  pasting requires the result to lex as a single preprocessing token. Basic
+  variadic macros are supported (`...`, `__VA_ARGS__`) including empty variadic
+  arguments in common forms.
+- **Conditionals:** `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif`,
+  `defined`/`defined(...)`, integer constant expression evaluation with arithmetic,
+  bitwise, comparison, logical, and conditional operators; undefined identifiers
+  evaluate to `0` in `#if`. Expression evaluation is implemented by a dedicated
+  parser/evaluator (no Python `eval()`).
+- **Includes:** quoted and angle-bracket includes, deterministic local/include-path
+  search (`include_paths`/`-I`-compatible internal configuration and optional
+  system include paths), nested includes, include-cycle detection, max include
+  depth, missing-file diagnostics, and `#pragma once`. Include names containing
+  `..` are rejected to avoid uncontrolled traversal.
+- **Built-ins/directives:** `__FILE__` and `__LINE__` expand dynamically. `__STDC__`
+  and `__STDC_VERSION__` are intentionally not defined yet (no language-mode claim).
+  `#line` is accepted as a no-op; `#error` is honored in active branches; unknown
+  pragmas (other than `once`) are ignored in inactive/active non-essential contexts
+  as appropriate for this phase.
+- **Limitations:** stringification spacing is an approximation because the lexer does
+  not preserve original whitespace tokens; full macro-prescan/blue-paint edge cases
+  and all standard preprocessing corner cases are not claimed; computed includes are
+  supported after macro expansion for string and `<...>` forms but broader forms may
+  be limited. These are documented constraints pending parser/front-end integration.
 
 ## 7. Known Phase 1 limitations (to be documented honestly)
 

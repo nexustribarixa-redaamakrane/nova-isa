@@ -246,7 +246,7 @@ class _Lexer:
         start = self._loc()
         if self.source[self.i] == ".":
             raise CompileError.at(start, "floating-point constants are not supported")
-        if self.source[self.i] == "0" and self._peek(1) in "xX":
+        if self.source[self.i] == "0" and self._peek(1) in ("x", "X"):
             text = self._advance(2)
             if not _is_hex_digit(self._peek()):
                 raise CompileError.at(start, "invalid hexadecimal constant")
@@ -256,12 +256,12 @@ class _Lexer:
                 self._advance()
             base = 16
             digits = text[2:]
-        elif self.source[self.i] == "0" and self._peek(1) in "bB":
+        elif self.source[self.i] == "0" and self._peek(1) in ("b", "B"):
             # Accept 0b/0B as an extension; value is still a C integer token.
             text = self._advance(2)
-            if self._peek() not in "01":
+            if self._peek() not in ("0", "1"):
                 raise CompileError.at(start, "invalid binary constant")
-            while self.i < self.length and (self.source[self.i] in "01'" ):
+            while self.i < self.length and self.source[self.i] in ("0", "1", "'"):
                 if self.source[self.i] != "'":
                     text += self.source[self.i]
                 self._advance()
