@@ -256,6 +256,28 @@ def test_forward_declared_tag_and_flexible_array_member():
     )
 
 
+def test_self_referential_struct_completes_pointer_field_pointee():
+    tu = sema(
+        """
+        struct Node { int value; struct Node *next; };
+        int f(void) {
+            struct Node a = {1, 0};
+            struct Node b = {2, 0};
+            a.next = &b;
+            return a.next->value;
+        }
+        """
+    )
+    rec = tu.scope.lookup_tag("Node").type
+    assert rec.complete
+    field = rec.field_map()["next"]
+    assert isinstance(field.type, t.PointerType)
+    # The field must reference the completed tag object, not a pre-completion
+    # shallow copy left incomplete forever.
+    assert field.type.pointee is rec
+    assert field.type.pointee.complete
+
+
 def test_control_flow_and_labels():
     sema(
         """

@@ -11,6 +11,7 @@ from .diagnostics import CompileError, Diagnostic, SourceLocation
 from .lexer import KEYWORDS, Token, TokenKind, lex
 from .parser import Parser, parse, parse_source
 from .preprocessor import Preprocessor, preprocess, preprocess_to_tokens, tokens_to_text
+from .codegen import generate
 from .sema import analyze
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "preprocess_to_tokens",
     "tokens_to_text",
     "analyze",
+    "generate",
 ]

@@ -66,13 +66,25 @@ class Type:
 
     @property
     def unqualified(self) -> "Type":
+        # Keep identity for already-unqualified types: record types are
+        # completed by mutation, and copying them here would detach pointer
+        # fields from the tag object that later becomes complete.
+        if self.qualifiers.empty:
+            return self
         return self.with_qualifiers(NO_QUALS)
 
     def with_qualifiers(self, qualifiers: Qualifiers) -> "Type":  # pragma: no cover - abstract-ish
         raise NotImplementedError
 
     def add_qualifiers(self, qualifiers: Qualifiers) -> "Type":
-        return self.with_qualifiers(self.qualifiers.union(qualifiers))
+        merged = self.qualifiers.union(qualifiers)
+        # Preserve object identity when nothing changes.  Completing a
+        # self-referential ``struct Node`` mutates the tag's type in place, so a
+        # gratuitous shallow copy here would leave pointer fields pointing at a
+        # permanently incomplete clone.
+        if merged == self.qualifiers:
+            return self
+        return self.with_qualifiers(merged)
 
     def is_same_unqualified(self, other: "Type") -> bool:
         return type_eq(strip_qualifiers(self), strip_qualifiers(other))
