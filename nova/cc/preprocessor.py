@@ -57,6 +57,7 @@ class PreprocessorOptions:
     include_paths: List[Path] = field(default_factory=list)
     system_include_paths: List[Path] = field(default_factory=list)
     defines: Dict[str, str] = field(default_factory=dict)
+    undefines: List[str] = field(default_factory=list)
     language: str = "nova-c11"  # documented initial mode; see _install_builtin_macros
 
 
@@ -72,6 +73,7 @@ class Preprocessor:
         self.include_stack: List[str] = []
         self._install_builtin_macros()
         self._install_initial_defines()
+        self._install_initial_undefines()
         # Default include context for top-level preprocessing.
         self._top_filename = filename
         self._top_directory = Path(directory) if directory is not None else Path.cwd()
@@ -139,6 +141,11 @@ class Preprocessor:
     def _install_initial_defines(self) -> None:
         for name, value in self.options.defines.items():
             self._define_from_text(name, value, SourceLocation("<command-line>", 1, 1))
+
+    def _install_initial_undefines(self) -> None:
+        # -U applies after builtin and -D definitions, so it can remove either.
+        for name in self.options.undefines:
+            self.macros.pop(name, None)
 
     def _define_from_text(self, name: str, value: str, loc: SourceLocation) -> None:
         toks = _lex_fragment(value, loc.file, loc.line)
@@ -1379,11 +1386,13 @@ def preprocess(source: str, filename: str = "<stdin>", *, directory: Optional[st
                include_paths: Optional[Sequence[str | Path]] = None,
                system_include_paths: Optional[Sequence[str | Path]] = None,
                defines: Optional[Dict[str, str]] = None,
+               undefines: Optional[Sequence[str]] = None,
                language: str = "nova-c11") -> str:
     opts = PreprocessorOptions(
         include_paths=[Path(p) for p in (include_paths or [])],
         system_include_paths=[Path(p) for p in (system_include_paths or [])],
         defines=dict(defines or {}),
+        undefines=list(undefines or []),
         language=language,
     )
     pp = Preprocessor(filename=filename, directory=Path(directory) if directory else None, options=opts)
@@ -1394,11 +1403,13 @@ def preprocess_to_tokens(source: str, filename: str = "<stdin>", *, directory: O
                          include_paths: Optional[Sequence[str | Path]] = None,
                          system_include_paths: Optional[Sequence[str | Path]] = None,
                          defines: Optional[Dict[str, str]] = None,
+                         undefines: Optional[Sequence[str]] = None,
                          language: str = "nova-c11") -> List[Token]:
     opts = PreprocessorOptions(
         include_paths=[Path(p) for p in (include_paths or [])],
         system_include_paths=[Path(p) for p in (system_include_paths or [])],
         defines=dict(defines or {}),
+        undefines=list(undefines or []),
         language=language,
     )
     pp = Preprocessor(filename=filename, directory=Path(directory) if directory else None, options=opts)

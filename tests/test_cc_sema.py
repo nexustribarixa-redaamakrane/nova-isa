@@ -579,6 +579,47 @@ def test_sizeof_rejects_invalid_and_incomplete_operands():
     expect_error("int f(void); int n = sizeof(f);", "sizeof(function type) is invalid")
     expect_error("int n = sizeof(int[]);", "incomplete array type")
     expect_error("struct S; int n = sizeof(struct S);", "sizeof incomplete type")
+    expect_error("union U; int n = sizeof(union U);", "sizeof incomplete type")
+
+
+def test_sizeof_allows_completed_and_pointer_to_incomplete_types():
+    tu = sema(
+        """
+        struct S;
+        struct S *p;
+        extern struct S later;
+        struct S { int x; };
+        int n = sizeof(struct S);
+        int m = sizeof(struct S *);
+        """
+    )
+    values = [d.init_declarators[0].initializer.const_value
+              for d in tu.declarations if isinstance(d, ast.Declaration)
+              and d.init_declarators and d.init_declarators[0].initializer is not None]
+    assert 4 in values and 8 in values
+
+
+def test_variable_length_arrays_are_diagnosed_explicitly():
+    err = expect_error("int f(int n) { int a[n]; return 0; }",
+                       "variable length arrays are not supported")
+    assert err.location.line == 1
+
+
+def test_static_function_definition_records_internal_linkage():
+    tu = sema("static int helper(void) { return 1; } int f(void) { return helper(); }")
+    helper = tu.declarations[0].symbol
+    assert helper.name == "helper"
+    assert helper.storage == "static"
+    assert helper.defined
+
+
+def test_conflicting_function_linkage_is_rejected():
+    expect_error(
+        "extern int f(void); static int f(void) { return 1; }",
+        "conflicting linkage",
+    )
+
+
 
 
 def test_incomplete_array_is_completed_from_initializer():

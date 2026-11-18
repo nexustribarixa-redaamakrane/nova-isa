@@ -903,3 +903,25 @@ def test_gnu_varargs_extension_still_documented_in_macro_behavior():
     assert "g(0)" in flat
     assert "h(0,1)" in flat
 
+
+def test_command_line_undefines_remove_user_and_builtin_macros():
+    src = """
+    #ifdef FOO
+    FOO
+    #else
+    NO_FOO
+    #endif
+    #ifdef __STDC__
+    STDC
+    #else
+    NO_STDC
+    #endif
+    """
+    out = norm_ws(pp(src, filename="t.c", defines={"FOO": "1"},
+                     undefines=["FOO", "__STDC__"]))
+    assert out == "NO_FOO NO_STDC"
+
+
+def test_command_line_undefine_of_absent_macro_is_ignored():
+    assert norm_ws(pp("int x;\n", undefines=["NEVER_DEFINED"])) == "int x;"
+

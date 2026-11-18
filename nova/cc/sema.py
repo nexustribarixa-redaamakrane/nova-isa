@@ -611,9 +611,14 @@ class Analyzer:
                         raise self.error(node.location, "array size must be non-negative")
                     length = int(val)
                 else:
-                    # VLA or non-constant bound: analyze the expression but keep the
-                    # static layout incomplete (runtime-sized bounds are not lowered).
+                    # A non-constant bound is a variable length array. Nova64
+                    # lowering has no runtime-sized stack allocation, so reject
+                    # it explicitly instead of reporting an incomplete type later.
                     self.analyze_expression(node.size)
+                    raise self.error(
+                        node.location,
+                        "variable length arrays are not supported by the Nova64 backend",
+                    )
             stripped = types.strip_qualifiers(base)
             if isinstance(stripped, FunctionType):
                 raise self.error(node.location, "array element cannot be a function type")
@@ -796,6 +801,7 @@ class Analyzer:
         ftype, name = self.analyze_declarator(base_type, fn.declarator)
         if name is None or not isinstance(types.strip_qualifiers(ftype), FunctionType):
             raise self.error(fn.location, "function definition requires a function declarator with a name")
+        storage_names = [s.name for s in fn.specifiers.storage]
         # declare in file scope (or current scope)
         existing = self.file_scope.lookup_ordinary_local(name)
         if existing is not None:
@@ -805,11 +811,19 @@ class Analyzer:
                 raise self.error(fn.location, f"conflicting types for function '{name}'")
             if existing.defined:
                 raise self.error(fn.location, f"redefinition of function '{name}'")
+            if storage_names and existing.storage and existing.storage != storage_names[0]:
+                raise self.error(
+                    fn.location,
+                    f"conflicting linkage for function '{name}'",
+                )
             existing.type = types.composite_type(existing.type, ftype)
             sym = existing
         else:
-            sym = Symbol(name, "function", ftype, fn.location, defined=False)
+            sym = Symbol(name, "function", ftype, fn.location, defined=False,
+                         storage=(storage_names[0] if storage_names else None))
             self.file_scope.ordinary[name] = sym
+        if storage_names:
+            sym.storage = storage_names[0]
         sym.defined = True
         self.current_function = sym
         ft = types.strip_qualifiers(ftype)
