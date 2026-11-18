@@ -202,6 +202,28 @@ CONFORMANCE_VECTORS: Tuple[dict, ...] = (
         expect={"regs": {2: make_object_reference(1, 1), 3: 24}},
     ),
     _vector(
+        "stage2-nested-translation",
+        "MOVI r1, 42\nHALT\n",
+        entry=0x40000000, load_at=0x30000000, steps=2,
+        memory=(
+            # Stage-1 tables (host physical because stage 2 is identity here).
+            (0x10000, 8, (0x11000 >> 12) << 12 | 1),
+            (0x11008, 8, (0x12000 >> 12) << 12 | 1),
+            (0x12000, 8, (0x13000 >> 12) << 12 | 1),
+            (0x13000, 8, (0x30000 << 12) | 0x1F),
+            # Stage-2 root and 1 GiB identity leaf.
+            (0x20000, 8, (0x21000 >> 12) << 12 | 1),
+            (0x21000, 8, 0x1F),
+        ),
+        csrs={
+            "ptbr": (1 << 63) | 0x10000,
+            "vptbr": (1 << 63) | 0x10000,
+            "s2ptbr": (1 << 63) | 0x20000,
+            "hstatus": 1,
+        },
+        expect={"regs": {1: 42}, "halted": True},
+    ),
+    _vector(
         "virtualization-guest-exit",
         "MOVI r1, 0x3000\nCSRW vpc, r1\nVMLAUNCH\nMOVI r4, 9\nHALT\n",
         steps=6,

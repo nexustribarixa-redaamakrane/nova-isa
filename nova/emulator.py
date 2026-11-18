@@ -97,6 +97,7 @@ from .isa import (
     PTE_BITS,
     REGISTERS,
     RESET_ENTRY,
+    S2PTBR,
     TIME,
     TIMECMP,
     TVAL,
@@ -853,7 +854,8 @@ class NovaMachine:
         self.object_generation = object_generation_seed
         self.halted = False
         # Nova v1.0 architectural state.
-        self._tlb: Dict[Tuple[int, int, int, int], int] = {}
+        self._tlb: Dict[Tuple[int, int, int, int], List[int]] = {}
+        self._tlb2: Dict[Tuple[int, int, int, int], List[int]] = {}
         self.ipi_log: List[Tuple[int, int]] = []
         self.irq_log: List[int] = []
         self.io_log: List[Tuple[int, bytes]] = []
@@ -973,7 +975,7 @@ class NovaMachine:
         """Host-side CSR write; bypasses privilege and WARL checks."""
         index = self._csr_index(csr)
         self._csr[index] = to_u64(value)
-        if index == PTBR:
+        if index in (PTBR, S2PTBR):
             self.flush_tlb(None)
 
     @staticmethod
@@ -1020,7 +1022,7 @@ class NovaMachine:
         if csr.align4 and value % INSTRUCTION_ALIGNMENT:
             self._trap(EXCEPTION_CODES["ALIGNMENT_FAULT"], value)
         self._csr[index] = value
-        if index == PTBR:
+        if index in (PTBR, S2PTBR):
             self.flush_tlb(None)
 
     @staticmethod
@@ -1086,10 +1088,12 @@ class NovaMachine:
         """Flush every translation, or only the page containing ``address``."""
         if address is None:
             self._tlb.clear()
+            self._tlb2.clear()
             return
         vpn = to_u64(address) >> PAGE_BITS
-        for key in [key for key in self._tlb if key[1] == vpn]:
-            del self._tlb[key]
+        for tlb in (self._tlb, self._tlb2):
+            for key in [key for key in tlb if key[1] == vpn]:
+                del tlb[key]
 
     def _canonical_va(self, address: int) -> bool:
         top_bits = WORD_BITS - VIRTUAL_ADDRESS_BITS + 1
@@ -1133,9 +1137,119 @@ class NovaMachine:
             ppn = (pte >> PAGE_BITS) & ppn_mask
         self._mmu_fault(address, MMU_DETAIL_MISSING)
 
+    def _translate_stage2(self, ipa: int, size: int, access: str,
+                          fault_va: int) -> int:
+        """Translate a guest-physical address to a host physical address.
+
+        Stage 2 uses the same four-level table and PTE format as stage 1, but
+        ignores the user bit: ownership is enforced by stage 1. When stage 2
+        is disabled it is an identity map. Faults always report the original
+        guest virtual address in ``tval``.
+        """
+        s2ptbr = self._csr[S2PTBR]
+        if not s2ptbr & (1 << 63):
+            return ipa
+        if ipa < 0 or ipa + size - 1 > WORD_MASK:
+            self._trap(EXCEPTION_CODES["MEMORY_FAULT"], ipa)
+        access_class = {"r": 0, "w": 1, "x": 2}[access]
+        key = (s2ptbr, ipa >> PAGE_BITS, access_class, 0)
+        entry = self._tlb2.get(key)
+        if entry is None:
+            ppn_mask = (1 << (PHYSICAL_ADDRESS_BITS - PAGE_BITS)) - 1
+            ppn = (s2ptbr >> PAGE_BITS) & ppn_mask
+            for level in range(PT_LEVELS):
+                shift = VIRTUAL_ADDRESS_BITS - PT_INDEX_BITS * (level + 1)
+                index = (ipa >> shift) & (PT_ENTRIES - 1)
+                pte_ipa = (ppn << PAGE_BITS) + index * 8
+                if pte_ipa + 7 >= (1 << PHYSICAL_ADDRESS_BITS):
+                    self._mmu_fault(fault_va, MMU_DETAIL_MISSING)
+                # Stage-2 PTEs live in host physical memory, so their
+                # addresses are physical, not guest-physical.
+                pte_address = pte_ipa
+                pte = self._read_mem(pte_address, 8)
+                if not pte & 0x1:
+                    self._mmu_fault(fault_va, MMU_DETAIL_MISSING)
+                if pte & ~((1 << PHYSICAL_ADDRESS_BITS) - 1):
+                    self._mmu_fault(fault_va, MMU_DETAIL_RESERVED_PTE)
+                if pte & 0xE:
+                    if level == 0:
+                        self._mmu_fault(fault_va, MMU_DETAIL_RESERVED_PTE)
+                    page_shift = PAGE_BITS + PT_INDEX_BITS * (PT_LEVELS - 1 - level)
+                    if pte & PTE_PPN_MASK & ((1 << page_shift) - 1):
+                        self._mmu_fault(fault_va, MMU_DETAIL_MISALIGNED_PTE)
+                    entry = [pte, pte_address, level]
+                    self._tlb2[key] = entry
+                    break
+                ppn = (pte >> PAGE_BITS) & ppn_mask
+            else:
+                self._mmu_fault(fault_va, MMU_DETAIL_MISSING)
+        pte, pte_address, level = entry
+        required = {"r": 0x2, "w": 0x4, "x": 0x8}[access]
+        if not pte & required:
+            self._mmu_fault(fault_va, MMU_DETAIL_PERMISSION)
+        if not pte & 0x40 or (access == "w" and not pte & 0x80):
+            pte |= 0x40 | (0x80 if access == "w" else 0)
+            entry[0] = pte
+            self._write_mem(pte_address, pte, 8)
+        page_shift = PAGE_BITS + PT_INDEX_BITS * (PT_LEVELS - 1 - level)
+        physical = (pte & PTE_PPN_MASK) | (ipa & ((1 << page_shift) - 1))
+        return physical & ((1 << PHYSICAL_ADDRESS_BITS) - 1)
+
+    def _walk_guest_page_table(self, address: int,
+                               fault_va: int) -> Tuple[int, int, int]:
+        """Stage-1 walk whose PTE reads pass through stage 2."""
+        ptbr = self._csr[PTBR]
+        ppn_mask = (1 << (PHYSICAL_ADDRESS_BITS - PAGE_BITS)) - 1
+        ppn = (ptbr >> PAGE_BITS) & ppn_mask
+        for level in range(PT_LEVELS):
+            shift = VIRTUAL_ADDRESS_BITS - PT_INDEX_BITS * (level + 1)
+            index = (address >> shift) & (PT_ENTRIES - 1)
+            pte_ipa = (ppn << PAGE_BITS) + index * 8
+            pte_address = self._translate_stage2(pte_ipa, 8, "r", fault_va)
+            pte = self._read_mem(pte_address, 8)
+            if not pte & 0x1:
+                self._mmu_fault(fault_va, MMU_DETAIL_MISSING)
+            if pte & ~((1 << PHYSICAL_ADDRESS_BITS) - 1):
+                self._mmu_fault(fault_va, MMU_DETAIL_RESERVED_PTE)
+            if pte & 0xE:
+                if level == 0:
+                    self._mmu_fault(fault_va, MMU_DETAIL_RESERVED_PTE)
+                page_shift = PAGE_BITS + PT_INDEX_BITS * (PT_LEVELS - 1 - level)
+                if pte & PTE_PPN_MASK & ((1 << page_shift) - 1):
+                    self._mmu_fault(fault_va, MMU_DETAIL_MISALIGNED_PTE)
+                return pte, pte_address, level
+            ppn = (pte >> PAGE_BITS) & ppn_mask
+        self._mmu_fault(fault_va, MMU_DETAIL_MISSING)
+
+    def _translate_nested(self, address: int, size: int, access: str) -> int:
+        """Compose stage 1 (virtual to guest-physical) with stage 2."""
+        ptbr = self._csr[PTBR]
+        if not ptbr & (1 << 63):
+            ipa = address  # guest bare mode still passes through stage 2
+        else:
+            pte, pte_address, level = self._walk_guest_page_table(address, address)
+            required = {"r": 0x2, "w": 0x4, "x": 0x8}[access]
+            if not pte & required or (self.priv == PRIV_USER and not pte & 0x10):
+                self._mmu_fault(address, MMU_DETAIL_PERMISSION)
+            page_shift = PAGE_BITS + PT_INDEX_BITS * (PT_LEVELS - 1 - level)
+            ipa = (pte & PTE_PPN_MASK) | (address & ((1 << page_shift) - 1))
+            if not pte & 0x40 or (access == "w" and not pte & 0x80):
+                pte |= 0x40 | (0x80 if access == "w" else 0)
+                # pte_address is already the host physical address returned
+                # by the stage-2 walk, so write back directly.
+                self._write_mem(pte_address, pte, 8)
+        return self._translate_stage2(ipa, size, access, address)
+
     def _translate(self, address: int, size: int, access: str) -> int:
         """Translate a virtual address and check its access permissions."""
         address = to_u64(address)
+        if (self._csr[HSTATUS] & 1) and (self._csr[S2PTBR] & (1 << 63)):
+            # A guest with stage-2 translation active composes both stages.
+            if not self._canonical_va(address):
+                self._mmu_fault(address, MMU_DETAIL_NONCANONICAL)
+            if address + size - 1 > WORD_MASK:
+                self._trap(EXCEPTION_CODES["MEMORY_FAULT"], address)
+            return self._translate_nested(address, size, access)
         ptbr = self._csr[PTBR]
         if not ptbr & (1 << 63):
             # Bare mode is an identity map over the whole 64-bit address space.

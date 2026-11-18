@@ -37,7 +37,7 @@ Nova has exactly one execution mode, named `Nova64`. There is no 32-bit compatib
 | Instruction width and alignment | 32 bits; 4-byte aligned |
 | Endianness | Little-endian for instructions and data |
 | GPR count | 32 |
-| CSR count | 32; indices 0–18 are assigned, 19–31 are reserved |
+| CSR count | 32; indices 0–19 are assigned, 20–31 are reserved |
 | Privilege values | user `0`, supervisor `1`, machine `2`; `3` is reserved |
 | Page sizes | 4 KiB, 2 MiB, and 1 GiB; base page is 4096 bytes |
 | Page-table depth | 4 levels of 512 entries |
@@ -79,12 +79,13 @@ Nova has exactly one execution mode, named `Nova64`. There is no 32-bit compatib
 | `16` | `vptbr` | 64 | `0x0` | machine read, machine write | any value | Guest page-table base, in the same format as `ptbr`. |
 | `17` | `vexit` | 64 | `0x0` | machine read, machine write | any value | VM exit reason, written on every guest exit. |
 | `18` | `hstatus` | 1 | `0x0` | machine read, machine write | any value | Hypervisor status. Bit 0 is set while guest execution is active; other bits are reserved (WARL). |
+| `19` | `s2ptbr` | 64 | `0x0` | machine read, machine write | any value | Stage-2 (guest-physical to host-physical) page-table base. Same format as `ptbr`: bit 63 enables stage-2 translation and bits 51:12 hold the root page number. Reset 0 disables stage 2, preserving the flat guest behavior. Writing it flushes every TLB entry. |
 <!-- END GENERATED: csr_table -->
 
 Rules that apply to every CSR:
 
 - **WARL.** Writes to reserved bits are discarded and those bits read as zero. `psr` has a mask of `0xF`, `priv` `0x3`, `ie`/`ip` `0x7`, `vpriv` `0x3`, and `hstatus` `0x1`.
-- **Reserved indices.** Indices 19–31 are WARL: reads return zero and writes are discarded. This lets a future revision assign one without changing the meaning of existing streams.
+- **Reserved indices.** Indices 20–31 are WARL: reads return zero and writes are discarded. This lets a future revision assign one without changing the meaning of existing streams.
 - **Privilege.** Executing `CSRR`/`CSRW` below the privilege required by the CSR raises PRIVILEGE with `ecause` equal to the CSR index. Machine access is always permitted.
 - **Alignment.** Writing a misaligned `epc`, `vbar`, or `ivec` raises ALIGNMENT_FAULT with `ecause` equal to the rejected value; the CSR keeps its old contents.
 - **Read-only.** Writing `coreid` or `time` raises PRIVILEGE. `coreid` reads the hart's architectural identity; the reference model has one hart and reads zero.
@@ -306,6 +307,12 @@ Between instructions, if any enabled source is pending in `ip`, the machine take
 Virtualization is an optional architectural extension that is implemented in the reference model. While `hstatus[0] = 0`, execution is normal. `VMLAUNCH` saves the host program counter, privilege, and page-table base, then loads `vpc`, `vpriv`, and `vptbr` into the active state and sets `hstatus[0]`. `VMRESUME` re-enters a guest after an exit without overwriting the saved host state. `VMEXIT uimm` writes the reason to `vexit`, restores the host state, and clears `hstatus[0]`.
 
 While a guest is active, any trap that would otherwise enter the host handler instead causes a VM exit: `vexit` receives the trap code, `ecause` receives its detail, `ecode` is cleared, and the host resumes after its entry instruction. The host can then inspect `vexit` and decide whether to inject the event into the guest or handle it itself. A nested `VMLAUNCH` or a `VMRESUME` with no saved host state raises VM_FAULT.
+
+### 12.1 Two-dimensional translation
+
+When `s2ptbr[63] = 1`, address translation inside a guest is **two-dimensional**. Stage 1 uses the guest page table (`vptbr`, loaded into `ptbr` on entry) to map a guest virtual address to a guest-physical address. Stage 2 uses `s2ptbr` to map that guest-physical address to a host physical address. Both stages use the same four-level table, page sizes, PTE format, and fault codes. The effective access must be permitted by both stages; the user bit is checked by stage 1 only, so a hypervisor cannot accidentally grant a guest user access by setting a stage-2 user bit. Stage-2 PTE reads use host physical addresses directly, and stage-1 PTE reads themselves pass through stage 2, so guest page tables cannot escape stage-2 isolation. A fault in either stage raises MMU_FAULT with the original guest virtual address in `tval`; when a guest is active that trap becomes a VM exit with `vexit = MMU_FAULT`, letting the host inspect `tval` and decide how to respond.
+
+With `s2ptbr[63] = 0`, stage 2 is an identity map and the guest sees the flat behavior of earlier revisions. Writing `ptbr` or `s2ptbr` flushes all TLB entries, including stage-2 entries. The reference model walks stage-2 translations on each access rather than caching them in hardware; this is architecturally invisible because only the flush behavior is specified.
 
 ## 13. Objects and references
 
@@ -561,7 +568,7 @@ The reference emulator is architectural: it models registers, the program counte
 
 ## 20. Implementation report
 
-**Implemented:** the complete base ISA defined above — 83 instructions across eight formats; the 64-bit-only profile with import-time enforcement; 19 assigned CSRs; the four-level translator with 4 KiB, 2 MiB and 1 GiB pages, permissions, faults, and TLB invalidation; six 64-bit atomics with acquire/release fields; the three-source interrupt architecture with IPIs and a multicore cluster helper; the virtualization extension; the finalized capability/permission object model with stable, versioned cross-process identities and an import/export format; the Nova ABI v1.0 conventions and standard syscall table; the assembler, disassembler, pseudo-instructions, relocatable objects, static linker, executable container, and four command-line tools.
+**Implemented:** the complete base ISA defined above — 83 instructions across eight formats; the 64-bit-only profile with import-time enforcement; 20 assigned CSRs; the four-level translator with 4 KiB, 2 MiB and 1 GiB pages, permissions, faults, and TLB invalidation; six 64-bit atomics with acquire/release fields; the three-source interrupt architecture with IPIs and a multicore cluster helper; the virtualization extension with two-dimensional translation; the finalized capability/permission object model with stable, versioned cross-process identities and an import/export format; the Nova ABI v1.0 conventions and standard syscall table; the assembler, disassembler, pseudo-instructions, relocatable objects, static linker, executable container, and four command-line tools.
 
 **Partially implemented:** the MMU TLB is a simple functional cache rather than a hardware-exact structure (the architecture exposes only its flush behavior, which is implemented); the cluster helper models hart identity, shared memory, and IPI routing, not physical interconnects; the memory consistency model is realized by direct sequential execution rather than by a relaxed hardware model with explicit barriers.
 

@@ -73,7 +73,7 @@ def test_csr_table_shape_and_access_rules():
     assert [csr.name for csr in CSR_TABLE.values()] == [
         "psr", "epc", "ecause", "ecode", "priv", "vbar", "coreid",
         "ptbr", "tval", "ie", "ip", "ivec", "time", "timecmp",
-        "vpc", "vpriv", "vptbr", "vexit", "hstatus",
+        "vpc", "vpriv", "vptbr", "vexit", "hstatus", "s2ptbr",
     ]
     for csr in CSR_TABLE.values():
         assert csr.mask and csr.mask & ~WORD_MASK == 0
@@ -95,7 +95,7 @@ def test_alignment_and_reset_rules():
     assert CSR_BY_NAME["vbar"].reset == RESET_VBAR
     assert CSR_BY_NAME["priv"].reset == 0
     assert CSR_BY_NAME["psr"].mask == 0xF
-    assert RESERVED_CSR_INDICES == tuple(range(19, 32))
+    assert RESERVED_CSR_INDICES == tuple(range(20, 32))
     assert CSR_BY_NAME["ptbr"].align4 is False
     assert CSR_BY_NAME["ivec"].align4 is True
     assert CSR_BY_NAME["timecmp"].reset == WORD_MASK
@@ -112,7 +112,7 @@ def test_every_csr_instruction_operand_parses_names_and_indices():
         assert assemble_text(f"CSRW {name}, r1\n")
         assert assemble_text(f"CSRR r1, #{CSR_BY_NAME[name].index}\n")
     # Reserved indices are encodable so that software can probe them.
-    assert assemble_text("CSRR r1, #19\n")
+    assert assemble_text("CSRR r1, #20\n")
     assert assemble_text("CSRW #31, r1\n")
 
 
@@ -151,7 +151,7 @@ def test_warl_discards_reserved_bits_of_psr():
 
 
 def test_reserved_csr_indices_read_zero_and_discard_writes():
-    source = "CSRW #19, r1\nCSRR r2, #19\nCSRR r3, #31\n"
+    source = "CSRW #20, r1\nCSRR r2, #20\nCSRR r3, #31\n"
     machine = machine_for(source)
     machine.regs[1] = 0x1234
     machine.run(3, stop_on_exception=False)
@@ -159,7 +159,7 @@ def test_reserved_csr_indices_read_zero_and_discard_writes():
     assert machine.regs[3] == 0
     assert machine.exception_code == CODE["NONE"]
     # The discarded write must not have created any hidden state.
-    assert machine.read_csr(19) == 0
+    assert machine.read_csr(20) == 0
 
 
 def test_user_mode_cannot_access_machine_only_csrs():
@@ -241,10 +241,10 @@ def test_host_csr_access_bypasses_checks_but_not_width():
 
 
 def test_csr_instructions_round_trip_through_text():
-    source = "CSRR r1, psr\nCSRW psr, r2\nCSRR r3, #19\nCSRW #19, r4\n"
+    source = "CSRR r1, psr\nCSRW psr, r2\nCSRR r3, #20\nCSRW #20, r4\n"
     code = assemble_text(source)
     assert disassemble_bytes(code) == [
-        "CSRR r1, psr", "CSRW psr, r2", "CSRR r3, #19", "CSRW #19, r4",
+        "CSRR r1, psr", "CSRW psr, r2", "CSRR r3, #20", "CSRW #20, r4",
     ]
     assert assemble_text("\n".join(disassemble_bytes(code)) + "\n") == code
 

@@ -392,6 +392,79 @@ def test_division_by_zero_uses_distinct_details():
 
 
 # --------------------------------------------------------------------------
+# Stage-2 virtualization
+# --------------------------------------------------------------------------
+
+
+def install_stage1_through_stage2(machine, va, ipa, root_ipa=0x10000):
+    """Write guest stage-1 tables into host memory via stage-2 translation."""
+    levels = [root_ipa + 0x1000 * index for index in range(4)]
+    for level in range(3):
+        index = (va >> (48 - 9 * (level + 1))) & 0x1FF
+        ipa_address = levels[level] + index * 8
+        physical = machine._translate_stage2(ipa_address, 8, "w", va)
+        machine._write_mem(physical, (levels[level + 1] >> 12) << 12 | 1, 8)
+    index = (va >> 12) & 0x1FF
+    ipa_address = levels[3] + index * 8
+    physical = machine._translate_stage2(ipa_address, 8, "w", va)
+    machine._write_mem(physical, ((ipa >> 12) << 12) | 0x1F, 8)
+    return (1 << 63) | root_ipa
+
+
+def test_stage2_translation_composes_with_stage1():
+    machine = NovaMachine()
+    # Stage 2 maps guest-physical 0..1 GiB to host-physical +0x80000000.
+    machine.write_csr("s2ptbr", install_huge_page(machine, 0, 0x80000000, 1,
+                                                  root=0x20000))
+    stage1 = install_stage1_through_stage2(machine, 0x20000000, 0x30000000)
+    machine.write_csr("vptbr", stage1)
+    machine.write_csr("ptbr", stage1)
+    machine.write_csr("hstatus", 1)
+
+    assert machine._translate(0x20000000, 8, "r") == 0xB0000000
+    assert machine._translate(0x20000123, 8, "r") == 0xB0000123
+
+
+def test_stage2_permission_denial_faults_with_guest_va():
+    machine = NovaMachine()
+    machine.write_csr("s2ptbr", install_huge_page(machine, 0, 0x80000000, 1,
+                                                  root=0x20000))
+    stage1 = install_stage1_through_stage2(machine, 0x20000000, 0x30000000)
+    machine.write_csr("vptbr", stage1)
+    machine.write_csr("ptbr", stage1)
+    machine.write_csr("hstatus", 1)
+    # Remove read permission from the stage-2 leaf (level 1, entry 0).
+    machine._write_mem(0x21000, ((0x80000000 >> 12) << 12) | 0x19, 8)
+    machine.flush_tlb(None)
+    with pytest.raises(Exception) as caught:
+        machine._translate(0x20000123, 8, "r")
+    assert caught.value.code == EXCEPTION_CODES["MMU_FAULT"]
+    assert machine.read_csr("tval") == 0x20000123
+
+
+def test_guest_execution_uses_two_dimensional_translation():
+    host = (
+        "LI r1, 0x40000000\nCSRW vpc, r1\n"
+        "VMLAUNCH\nMOVI r4, 9\nHALT\n"
+    )
+    machine = machine_for(host)
+    machine.load_code(assemble_text("MOVI r5, 7\nVMEXIT 1\n"), 0x30000000)
+    machine.pc = 0x1000
+
+    # Identity stage 2, so stage-1 tables at IPA 0x10000 live at PA 0x10000.
+    machine.write_csr("s2ptbr", install_huge_page(machine, 0, 0, 1,
+                                                  root=0x20000))
+    stage1 = install_stage1_through_stage2(machine, 0x40000000, 0x30000000)
+    machine.write_csr("vptbr", stage1)
+    machine.write_csr("vpriv", 2)
+    machine.run(11, stop_on_exception=False)
+    assert machine.read_register("r5") == 7
+    assert machine.read_register("r4") == 9
+    assert machine.read_csr("vexit") == 1
+    assert machine.read_csr("hstatus") == 0
+
+
+# --------------------------------------------------------------------------
 # Stable object identities, serialization, and versioning
 # --------------------------------------------------------------------------
 

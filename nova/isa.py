@@ -1306,6 +1306,19 @@ _CSR_DEFINITIONS: Tuple[CsrDef, ...] = (
         min_read_privilege="machine",
         min_write_privilege="machine",
     ),
+    CsrDef(
+        index=19,
+        name="s2ptbr",
+        description="Stage-2 (guest-physical to host-physical) page-table base. "
+                    "Same format as `ptbr`: bit 63 enables stage-2 translation "
+                    "and bits 51:12 hold the root page number. Reset 0 disables "
+                    "stage 2, preserving the flat guest behavior. Writing it "
+                    "flushes every TLB entry.",
+        reset=0,
+        mask=PTBR_MASK,
+        min_read_privilege="machine",
+        min_write_privilege="machine",
+    ),
 )
 
 CSR_TABLE: Mapping[int, CsrDef] = MappingProxyType(
@@ -1342,6 +1355,7 @@ VPRIV = CSR_BY_NAME["vpriv"].index
 VPTBR = CSR_BY_NAME["vptbr"].index
 VEXIT = CSR_BY_NAME["vexit"].index
 HSTATUS = CSR_BY_NAME["hstatus"].index
+S2PTBR = CSR_BY_NAME["s2ptbr"].index
 
 #: PSR flag bit positions.
 FLAG_ZERO = 0
