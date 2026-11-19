@@ -925,3 +925,48 @@ def test_command_line_undefines_remove_user_and_builtin_macros():
 def test_command_line_undefine_of_absent_macro_is_ignored():
     assert norm_ws(pp("int x;\n", undefines=["NEVER_DEFINED"])) == "int x;"
 
+
+def test_block_comment_may_span_multiple_lines():
+    src = """
+    int a;
+    /* first line
+       second line
+       third line */
+    int b;
+    """
+    assert norm_ws(pp(src)) == "int a;int b;"
+
+
+def test_unterminated_block_comment_reports_its_start():
+    src = """
+    int a;
+    /* first line
+       second line
+    """
+    with pytest.raises(CompileError) as excinfo:
+        pp(src, filename="comments.c")
+    message = str(excinfo.value)
+    assert "comments.c:3:1" in message
+    assert "unterminated block comment" in message
+
+
+def test_comment_markers_inside_strings_and_char_constants_are_literal():
+    src = """
+    char *a = "/* not a comment";
+    char b = '/';
+    char *c = "*/";
+    int d;
+    """
+    out = norm_ws(pp(src))
+    assert '"/* not a comment"' in out
+    assert '"*/"' in out
+    assert "int d;" in out
+
+
+def test_block_comment_may_span_directive_lines_and_is_blanked():
+    src = """
+    #define VALUE /* hidden
+       comment */ 7
+    int x = VALUE;
+    """
+    assert norm_ws(pp(src)) == "int x=7;"

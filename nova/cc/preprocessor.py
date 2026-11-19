@@ -170,6 +170,15 @@ class Preprocessor:
             # Logical location state for this source: can be changed by #line.
             logical_file = filename
             line_override: Optional[Tuple[int, int]] = None  # (physical_line, logical_line)
+            # Block comments may span physical/logical lines.  They are removed
+            # here, before directive detection, with characters replaced by
+            # spaces so token columns and diagnostics keep their positions.
+            in_comment = False
+            comment_start: Optional[SourceLocation] = None
+            # A directive that opens a block comment continues on the lines
+            # where that comment ends (C translation phases remove the comment
+            # and its newlines before directives are recognised).
+            pending_directive: Optional[dict] = None
             for logical in logical_lines:
                 line_text = logical.text
                 phys_line_no = logical.start_phys_line
@@ -177,8 +186,32 @@ class Preprocessor:
                 if line_override is not None:
                     base_phys, base_logical = line_override
                     logical_line_no = base_logical + (phys_line_no - base_phys)
+                was_in_comment = in_comment
+                line_text, in_comment, comment_start = _strip_block_comments(
+                    line_text, in_comment, comment_start, filename, phys_line_no
+                )
+                if was_in_comment and pending_directive is not None:
+                    pending_directive["text"] += " " + line_text
+                    if in_comment:
+                        continue
+                    line_text = pending_directive["text"]
+                    logical_line_no = pending_directive["line_no"]
+                    logical_file = pending_directive["file"]
+                    splice_segments = pending_directive["segments"]
+                    pending_directive = None
+                else:
+                    splice_segments = logical.segments
+                    if (not was_in_comment and in_comment
+                            and line_text.lstrip(" \t\v\f").startswith("#")):
+                        pending_directive = {
+                            "text": line_text,
+                            "line_no": logical_line_no,
+                            "file": logical_file,
+                            "segments": logical.segments,
+                        }
+                        continue
                 self._process_logical_line(line_text, logical_line_no, logical_file, directory, output, depth,
-                                           phys_filename=filename, splice_segments=logical.segments)
+                                           phys_filename=filename, splice_segments=splice_segments)
                 # If directive changed mapping, update state
                 if hasattr(self, "_pending_line_override"):
                     override = getattr(self, "_pending_line_override")
@@ -197,6 +230,8 @@ class Preprocessor:
                 if hasattr(self, "_pending_logical_file"):
                     logical_file = getattr(self, "_pending_logical_file")
                     delattr(self, "_pending_logical_file")
+            if in_comment and comment_start is not None:
+                raise CompileError.at(comment_start, "unterminated block comment")
             return output
         finally:
             self.include_stack.pop()
@@ -1150,6 +1185,60 @@ class LogicalLine:
     text: str
     start_phys_line: int
     segments: List[SpliceSegment]
+
+
+def _strip_block_comments(text: str, in_comment: bool,
+                          comment_start: Optional[SourceLocation],
+                          filename: str, line_no: int
+                          ) -> Tuple[str, bool, Optional[SourceLocation]]:
+    """Blank out comments while preserving column positions.
+
+    Returns ``(cleaned_text, still_in_comment, start_location)``.  Strings and
+    character constants are skipped so comment markers inside them are literal.
+    A block comment that begins on one logical line and ends on a later one is
+    handled by carrying ``in_comment`` between calls; the caller reports an
+    unterminated comment at end of file.
+    """
+    out = list(text)
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_comment:
+            if ch == "*" and i + 1 < n and text[i + 1] == "/":
+                out[i] = " "
+                out[i + 1] = " "
+                in_comment = False
+                i += 2
+            else:
+                out[i] = " "
+                i += 1
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            i += 1
+            while i < n:
+                c = text[i]
+                if c == "\\":
+                    i += 2
+                    continue
+                i += 1
+                if c == quote:
+                    break
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            out[i] = " "
+            out[i + 1] = " "
+            in_comment = True
+            comment_start = SourceLocation(filename, line_no, i + 1)
+            i += 2
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            for j in range(i, n):
+                out[j] = " "
+            break
+        i += 1
+    return "".join(out), in_comment, comment_start
 
 
 def splice_lines(source: str, filename: str) -> List[LogicalLine]:

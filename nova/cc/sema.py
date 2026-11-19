@@ -1167,6 +1167,20 @@ class Analyzer:
             return self.analyze_conditional(expr)
         if isinstance(expr, ast.CastExpression):
             return self.analyze_cast(expr)
+        if isinstance(expr, ast.VaArgExpression):
+            self.analyze_expression(expr.ap)
+            ttype = self.analyze_type_name(expr.type_name)
+            target = types.strip_qualifiers(ttype)
+            if isinstance(target, (VoidType, FunctionType, ArrayType)):
+                raise self.error(expr.location,
+                                 f"invalid va_arg type '{ttype.describe()}'")
+            if target.is_incomplete():
+                raise self.error(expr.location,
+                                 f"va_arg type '{ttype.describe()}' is incomplete")
+            self.require_lowering_supported(ttype, expr.location,
+                                            "va_arg types")
+            expr.value_category = "rvalue"  # type: ignore[attr-defined]
+            return ttype
         if isinstance(expr, ast.CallExpression):
             return self.analyze_call(expr)
         if isinstance(expr, ast.SubscriptExpression):
@@ -1480,6 +1494,16 @@ class Analyzer:
                     if types.is_integer_type(at):
                         promoted = types.integer_promotions(at, self.ctx)
                         self.note_conversion(arg, promoted, "default argument promotion", source=at)
+                    else:
+                        # Array and function designators decay to pointers in
+                        # the default argument promotions too; without this the
+                        # lowerer would try to pass the whole object as an
+                        # aggregate variadic argument.
+                        decayed = self.decay_expr_type(arg, at)
+                        if decayed is not at:
+                            self.note_conversion(arg, decayed,
+                                                 "default argument promotion",
+                                                 source=at)
         self.require_lowering_supported(ft.return_type, expr.location, "call return types")
         expr.value_category = "rvalue"  # type: ignore[attr-defined]
         return ft.return_type

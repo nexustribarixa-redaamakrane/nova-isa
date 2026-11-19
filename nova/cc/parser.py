@@ -760,6 +760,16 @@ class Parser:
         expr = self.parse_primary_expression()
         while True:
             if self.match_punct("("):
+                if (isinstance(expr, ast.IdentifierExpression)
+                        and expr.name == "__builtin_va_arg"):
+                    ap_expr = self.parse_assignment_expression()
+                    self.expect_punct(",", "expected ',' before va_arg type")
+                    type_name = self.parse_type_name()
+                    self.expect_punct(")", "expected ')' after va_arg type")
+                    expr = ast.VaArgExpression(location=expr.location,
+                                               ap=ap_expr,
+                                               type_name=type_name)
+                    continue
                 args = self.parse_argument_expression_list()
                 expr = ast.CallExpression(location=expr.location, callee=expr, arguments=args)
                 continue

@@ -282,6 +282,18 @@ class CallExpression(Expression):
 
 
 @dataclass
+class VaArgExpression(Expression):
+    """``__builtin_va_arg(ap, type)``.
+
+    The destination type is a type-name, not an expression, so this node is
+    produced by the parser directly instead of the ordinary call form.
+    """
+
+    ap: Expression = field(default_factory=lambda: IdentifierExpression(location=SourceLocation(), name=""))
+    type_name: TypeName = field(default_factory=lambda: TypeName(location=SourceLocation()))
+
+
+@dataclass
 class SubscriptExpression(Expression):
     array: Expression = field(default_factory=lambda: IdentifierExpression(location=SourceLocation(), name=""))
     index: Expression = field(default_factory=lambda: IntegerLiteral(location=SourceLocation(), value="0", number=0))

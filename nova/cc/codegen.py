@@ -258,6 +258,8 @@ class CodeGenerator:
         self.function: Optional[ast.FunctionDefinition] = None
         self.function_type: Optional[FunctionType] = None
         self.hidden_return_slot: Optional[Slot] = None
+        self.va_reg_save: Optional[Slot] = None
+        self.va_base: Optional[Slot] = None
         self.epilogue_label: Optional[str] = None
         self.unique = 0
         self.function_counter = 0
@@ -559,20 +561,73 @@ class CodeGenerator:
         self._load_slot(addr, "t2")
         if offset:
             self._emit_addi("t2", "t2", offset)
-        op = {8: "LDD", 4: "LDWU", 2: "LDHU", 1: "LDBU"}.get(min(size, 8))
-        if op is None:
+        if size >= 8:
+            self._emit(f"LDD {dest}, [t2]")
+            return
+        op = {4: "LDWU", 2: "LDHU", 1: "LDBU"}.get(size)
+        if op is not None:
+            self._emit(f"{op} {dest}, [t2]")
+            return
+        if size <= 0:
             raise _unsupported(node, "zero-sized ABI chunk")
-        self._emit(f"{op} {dest}, [t2]")
+        # The ABI passes a short final chunk as a full eight-byte slot.  Build
+        # the value from legal widths instead of reading past the object.
+        if size >= 4:
+            self._emit("LDWU t0, [t2]")
+            remaining = size - 4
+            position = 4
+        else:
+            self._emit("MOVI t0, 0")
+            remaining = size
+            position = 0
+        while remaining > 0:
+            width = 2 if remaining >= 2 else 1
+            op = "LDHU" if width == 2 else "LDBU"
+            self._emit(f"{op} t3, [t2 + {position}]")
+            self._emit(f"SHLI t3, t3, {position * 8}")
+            self._emit("OR t0, t0, t3")
+            remaining -= width
+            position += width
+        if dest != "t0":
+            self._emit(f"MOV {dest}, t0")
 
     def _store_chunk(self, addr: Slot, offset: int, size: int,
                      src: str, node: object) -> None:
         self._load_slot(addr, "t2")
+        self._store_chunk_at("t2", offset, size, src, node)
+
+    def _store_chunk_at(self, base: str, offset: int, size: int,
+                        src: str, node: object) -> None:
         if offset:
-            self._emit_addi("t2", "t2", offset)
-        op = {8: "STD", 4: "STW", 2: "STH", 1: "STB"}.get(min(size, 8))
-        if op is None:
+            self._emit_addi(base, base, offset)
+        if size >= 8:
+            self._emit(f"STD {src}, [{base}]")
+            return
+        op = {4: "STW", 2: "STH", 1: "STB"}.get(size)
+        if op is not None:
+            self._emit(f"{op} {src}, [{base}]")
+            return
+        if size <= 0:
             raise _unsupported(node, "zero-sized ABI chunk")
-        self._emit(f"{op} {src}, [t2]")
+        # Store a short final chunk without overwriting neighbouring bytes.
+        if size >= 4:
+            self._emit(f"STW {src}, [t2]")
+            remaining = size - 4
+            position = 4
+            self._emit(f"MOV t1, {src}")
+            self._emit("SHRI t1, t1, 32")
+        else:
+            remaining = size
+            position = 0
+            self._emit(f"MOV t1, {src}")
+        while remaining > 0:
+            width = 2 if remaining >= 2 else 1
+            op = "STH" if width == 2 else "STB"
+            self._emit(f"{op} t1, [t2 + {position}]")
+            if remaining > width:
+                self._emit(f"SHRI t1, t1, {width * 8}")
+            remaining -= width
+            position += width
 
     def _chunk_count(self, t: Type, node: object) -> int:
         if _is_record(t):
@@ -814,6 +869,9 @@ class CodeGenerator:
 
         if isinstance(expr, ast.CallExpression):
             return self._gen_call(expr)
+
+        if isinstance(expr, ast.VaArgExpression):
+            return self._gen_va_arg(expr)
 
         if isinstance(expr, ast.SubscriptExpression):
             return self._gen_addr(expr)
@@ -1217,6 +1275,11 @@ class CodeGenerator:
         self._emit(f"STD {value}, [sp + {stack_index * WORD_BYTES}]")
 
     def _gen_call(self, expr: ast.CallExpression) -> ExprResult:
+        if isinstance(expr.callee, ast.IdentifierExpression):
+            builtin = expr.callee.name
+            if builtin in ("__builtin_va_start", "__builtin_va_end",
+                           "__builtin_va_copy"):
+                return self._gen_va_builtin(builtin, expr)
         ft = self._function_type(expr.callee)
         return_type = _strip(ft.return_type)
         is_void = isinstance(return_type, VoidType)
@@ -1313,6 +1376,112 @@ class CodeGenerator:
         self._store_slot(result_slot, "a0")
         return ExprResult(result_slot, return_type, False)
 
+    # -- variadic argument access -------------------------------------------
+
+    def _void_result(self, expr: ast.Expression) -> ExprResult:
+        return ExprResult(self._temp(self.ctx.int_t, expr), self.ctx.void_t,
+                          False)
+
+    def _fixed_argument_chunks(self, expr: ast.Expression) -> int:
+        """Number of eight-byte chunks consumed by fixed parameters."""
+        ft = self.function_type
+        if ft is None:
+            raise _unsupported(expr, "va_start outside a function definition")
+        total = 1 if self.hidden_return_slot is not None else 0
+        for param in ft.params:
+            total += self._chunk_count(param.type, expr)
+        return total
+
+    def _gen_va_builtin(self, name: str,
+                        expr: ast.CallExpression) -> ExprResult:
+        if name == "__builtin_va_start":
+            if self.va_reg_save is None or self.va_base is None:
+                raise _unsupported(
+                    expr, "va_start in a function that is not variadic")
+            if not expr.arguments:
+                raise _unsupported(expr, "va_start without a va_list argument")
+            ap = self._gen_rvalue(expr.arguments[0])
+            fixed = self._fixed_argument_chunks(expr)
+            gp_offset = min(fixed, len(ARG_REGISTERS)) * WORD_BYTES
+            stack_chunks = max(0, fixed - len(ARG_REGISTERS))
+            self._load_slot(ap.slot, "t0")
+            self._emit_li("t1", gp_offset)
+            self._emit("STW t1, [t0 + 0]")
+            self._emit("MOVI t1, 0")
+            self._emit("STW t1, [t0 + 4]")
+            self._load_slot(self.va_base, "t1")
+            if stack_chunks:
+                self._emit_addi("t1", "t1", stack_chunks * WORD_BYTES)
+            self._emit("STD t1, [t0 + 8]")
+            self._emit_addi("t1", "sp", self.va_reg_save.offset)
+            self._emit("STD t1, [t0 + 16]")
+            return self._void_result(expr)
+
+        if name == "__builtin_va_end":
+            if expr.arguments:
+                self._gen_rvalue(expr.arguments[0])
+            return self._void_result(expr)
+
+        # __builtin_va_copy(destination, source)
+        if len(expr.arguments) != 2:
+            raise _unsupported(expr, "va_copy without two va_list arguments")
+        dest = self._gen_rvalue(expr.arguments[0])
+        source = self._gen_rvalue(expr.arguments[1])
+        self._load_slot(dest.slot, "t0")
+        self._load_slot(source.slot, "t1")
+        for offset in (0, 8, 16):
+            self._emit(f"LDD t2, [t1 + {offset}]")
+            self._emit(f"STD t2, [t0 + {offset}]")
+        return self._void_result(expr)
+
+    def _gen_va_arg(self, expr: ast.VaArgExpression) -> ExprResult:
+        if self.frame is None:
+            raise _unsupported(expr, "va_arg outside a function definition")
+        target = self._type_of_name(expr.type_name)
+        target0 = _strip(target)
+        if isinstance(target0, (VoidType, FunctionType, ArrayType)):
+            raise _unsupported(expr, f"va_arg of type '{target.describe()}'")
+        chunks = self._chunk_count(target0, expr)
+        size = _type_size(target0, expr)
+
+        ap = self._gen_rvalue(expr.ap)
+        obj = self._temp(target0, expr)
+        obj_ptr = self._temp(PointerType(target0), expr)
+        self._slot_address(obj, "a1")
+        self._store_slot(obj_ptr, "a1")
+        self._load_slot(ap.slot, "t0")
+        self._emit("LDWU t1, [t0 + 0]")       # gp_offset
+        self._emit("LDD t3, [t0 + 8]")        # overflow_arg_area
+
+        for chunk_index in range(chunks):
+            offset = chunk_index * WORD_BYTES
+            use_reg = self._new_label("va_reg")
+            done = self._new_label("va_done")
+            self._emit_li("t2", len(ARG_REGISTERS) * WORD_BYTES)
+            self._emit_branch("BLTU", "t1, t2", use_reg)
+            # No argument registers left: read and advance overflow area.
+            self._emit("LDD a0, [t3]")
+            self._emit("ADDI t3, t3, 8")
+            self._emit_jump(done)
+            self._emit_label(use_reg)
+            self._emit("LDD t2, [t0 + 16]")    # reg_save_area
+            self._emit("ADD t2, t2, t1")
+            self._emit("LDD a0, [t2]")
+            self._emit("ADDI t1, t1, 8")
+            self._emit_label(done)
+            width = min(WORD_BYTES, size - offset)
+            self._store_chunk(obj_ptr, offset, width, "a0", expr)
+
+        self._emit("STW t1, [t0 + 0]")
+        self._emit("STD t3, [t0 + 8]")
+
+        if _is_aggregate(target0):
+            return ExprResult(obj_ptr, target0, True)
+        value = self._temp(target0, expr)
+        self._load_from_slot_typed(obj, "t0", target0, expr)
+        self._store_slot(value, "t0")
+        return ExprResult(value, target0, False)
+
     # -- conditions ----------------------------------------------------------
 
     def _gen_cond(self, expr: ast.Expression, true_label: str,
@@ -1376,6 +1545,8 @@ class CodeGenerator:
         self.switch_stack = []
         self.epilogue_label = self._new_label("return_epilogue")
         self.hidden_return_slot = None
+        self.va_reg_save = None
+        self.va_base = None
         self._collect_goto_labels(fn.body)
 
         return_type = _strip(ftype.return_type)
@@ -1383,6 +1554,17 @@ class CodeGenerator:
                   _type_size(return_type, fn) > AGGREGATE_REGISTER_RETURN_BYTES)
         if hidden:
             self.hidden_return_slot = self.frame.temp(PointerType(return_type), fn.location)
+
+        if ftype.variadic:
+            # ABI section 7: a callee using va_start spills a0-a5 into a
+            # 48-byte register save area.  The base slot records the incoming
+            # stack pointer once the final frame size is known.
+            self.va_reg_save = self.frame.allocate(
+                ArrayType(self.ctx.ulong_t, len(ARG_REGISTERS)),
+                fn.location, name="__nova_va_reg_save")
+            self.va_base = self.frame.allocate(
+                PointerType(self.ctx.void_t), fn.location,
+                name="__nova_va_base")
 
         params = self._allocate_parameters(ftype, fn)
         body: List[str] = []
@@ -1406,6 +1588,19 @@ class CodeGenerator:
         prologue.append(f"STD ra, [sp + {RA_SAVE_OFFSET}]")
         if hidden and self.hidden_return_slot is not None:
             prologue.append(f"STD a0, [sp + {self.hidden_return_slot.offset}]")
+        if (ftype.variadic and self.va_reg_save is not None
+                and self.va_base is not None):
+            for index, register in enumerate(ARG_REGISTERS):
+                prologue.append(
+                    f"STD {register}, [sp + "
+                    f"{self.va_reg_save.offset + index * WORD_BYTES}]"
+                )
+            if _fits_simm(frame_size):
+                prologue.append(f"ADDI t0, sp, {frame_size}")
+            else:
+                prologue.append(f"LI t0, {frame_size}")
+                prologue.append("ADD t0, sp, t0")
+            prologue.append(f"STD t0, [sp + {self.va_base.offset}]")
         prologue.extend(
             self._load_incoming_parameters(ftype, params, frame_size, hidden, fn)
         )
@@ -1422,6 +1617,8 @@ class CodeGenerator:
         self.function_type = None
         self.frame = None
         self.hidden_return_slot = None
+        self.va_reg_save = None
+        self.va_base = None
         self.epilogue_label = None
 
     def _allocate_parameters(self, ft: FunctionType,
@@ -1463,13 +1660,8 @@ class CodeGenerator:
                 if value != "t0":
                     self._emit(f"MOV t0, {value}")
                 width = min(WORD_BYTES, size - chunk_offset)
-                op = {8: "STD", 4: "STW", 2: "STH", 1: "STB"}.get(width)
-                if op is None:
-                    raise _unsupported(node, "zero-sized parameter chunk")
-                self._slot_address(slot, "t1")
-                if chunk_offset:
-                    self._emit_addi("t1", "t1", chunk_offset)
-                self._emit(f"{op} t0, [t1]")
+                self._slot_address(slot, "t2")
+                self._store_chunk_at("t2", chunk_offset, width, "t0", node)
                 chunk_offset += WORD_BYTES
                 reg_index += 1
         self.out = saved_out
@@ -1686,7 +1878,7 @@ class CodeGenerator:
                 if isinstance(item, ast.Statement):
                     self._collect_switch_labels(item, labels)
         elif isinstance(stmt, ast.IfStatement):
-            self._collect_switch_labels(stmt.body, labels)
+            self._collect_switch_labels(stmt.then_branch, labels)
             if stmt.else_branch is not None:
                 self._collect_switch_labels(stmt.else_branch, labels)
         elif isinstance(stmt, (ast.WhileStatement, ast.DoWhileStatement, ast.ForStatement)):

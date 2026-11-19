@@ -658,3 +658,56 @@ def test_long_branches_use_documented_bl_pseudo_and_still_execute():
         {"PCREL_DISP14", "PCREL_LONG", "LA64", "ABS64"}
     assert run_program(asm) == 8
 
+
+def test_switch_inside_if_collects_labels_and_executes():
+    asm = generate(
+        analyze(parse_source(
+            """
+            int main(void) {
+                int value = 2;
+                if (value != 0) {
+                    switch (value) {
+                    case 1: return 1;
+                    case 2: return 42;
+                    default: return 3;
+                    }
+                }
+                return 4;
+            }
+            """,
+            filename="switchif.c",
+        ))
+    )
+    assert run_program(asm) == 42
+
+
+def test_odd_sized_aggregate_uses_partial_argument_and_return_chunks():
+    asm = generate(
+        analyze(parse_source(
+            """
+            struct Six { char a[6]; };
+            struct Six make(int base) {
+                struct Six s = {{1, 2, 3, 4, 5, 6}};
+                if (base) {
+                    s.a[0] = (char)(base + 0);
+                }
+                return s;
+            }
+            int total(struct Six s) {
+                int i, sum = 0;
+                for (i = 0; i < 6; i++) {
+                    sum += s.a[i];
+                }
+                return sum;
+            }
+            int main(void) {
+                struct Six s = make(10);
+                if (total(s) != 30) return 1;
+                if (total(make(0)) != 21) return 2;
+                return 0;
+            }
+            """,
+            filename="oddaggregate.c",
+        ))
+    )
+    assert run_program(asm) == 0
