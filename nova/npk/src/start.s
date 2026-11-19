@@ -5,9 +5,9 @@
 ; link-computed address, writes the early-boot handshake word, calls the C
 ; entry point, and halts with its return value in a0.
 ;
-; This is a boot foundation only: `npk_main` runs the minimal boot-verification
-; processing pipeline, but there is no trap dispatcher, allocator, syscall
-; handler, device driver, scheduler, or user loader yet.
+; This is the boot entry only. The machine-mode exception vector is defined in
+; `trap.s`; there is still no allocator, syscall service, device driver,
+; scheduler, or user loader.
 
 .section .text
 .global _npk_start
@@ -21,8 +21,4 @@ _npk_start:
     LA ra, .Lnpk_halt
     BL npk_main
 .Lnpk_halt:
-    HALT
-
-.global _npk_exception_vector
-_npk_exception_vector:
     HALT

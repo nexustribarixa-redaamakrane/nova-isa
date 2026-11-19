@@ -2,8 +2,9 @@
 
 The build deliberately uses only the Phase 1 interfaces: the assembler object
 frontend, ``nova-cc``, the linker, and the ``.nob`` container. It assembles the
-boot entry and compiles the processing and coordinator translation units. No new
-build language or executable format is introduced.
+boot entry and Nova assembly trap entry, then compiles the processing, trap
+dispatch, and coordinator translation units. No new build language or executable
+format is introduced.
 """
 
 from __future__ import annotations
@@ -42,17 +43,23 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     start_source = _source_path("start.s")
+    trap_source = _source_path("trap.s")
     kernel_source = _source_path("kernel.c")
     processing_source = _source_path("processing.c")
+    trap_c_source = _source_path("trap.c")
     start_object = out / "npk_start.nobj"
+    trap_object = out / "npk_trap_entry.nobj"
     kernel_object = out / "npk_kernel.nobj"
     processing_object = out / "npk_processing.nobj"
+    trap_c_object = out / "npk_trap_dispatch.nobj"
     image_path = out / "npk.nob"
 
     try:
-        start_assembly = start_source.read_text(encoding="utf-8")
-        start_obj = assemble_object(start_assembly)
-        start_object.write_bytes(encode_object(start_obj))
+        for source, object_path in ((start_source, start_object),
+                                    (trap_source, trap_object)):
+            assembly = source.read_text(encoding="utf-8")
+            obj = assemble_object(assembly)
+            object_path.write_bytes(encode_object(obj))
     except (OSError, UnicodeDecodeError, AssemblyError) as exc:
         raise NpkBuildError(f"nova-as: {exc}") from exc
 
@@ -65,11 +72,17 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
         cc_main([str(processing_source), *cc_options, "-o", str(processing_object)]),
         "nova-cc processing",
     )
+    _require_ok(
+        cc_main([str(trap_c_source), *cc_options, "-o", str(trap_c_object)]),
+        "nova-cc trap dispatch",
+    )
 
     try:
         objects = [
             load_object(start_object),
+            load_object(trap_object),
             load_object(processing_object),
+            load_object(trap_c_object),
             load_object(kernel_object),
         ]
         image = link_objects(
@@ -87,6 +100,8 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
 
     if not keep_objects:
         start_object.unlink(missing_ok=True)
+        trap_object.unlink(missing_ok=True)
         processing_object.unlink(missing_ok=True)
+        trap_c_object.unlink(missing_ok=True)
         kernel_object.unlink(missing_ok=True)
     return image_path

@@ -39,6 +39,24 @@ RECEIPT_TABLE_ADDRESS = 0x90220
 RECEIPT_SIZE = 128
 RECEIPT_SLOTS = 12
 
+#: Milestone 3 scratch slots addressed through r0 by the trap entry stub.
+TRAP_SCRATCH_ADDRESS = 0x200
+TRAP_SCRATCH_SIZE = 24
+
+#: Separate trap stack; handlers never use the interrupted context's stack.
+TRAP_STACK_TOP = 0x88000
+
+#: 304-byte software trap frame preserved by the assembly trap entry.
+TRAP_FRAME_ADDRESS = 0x90900
+TRAP_FRAME_SIZE = 304
+TRAP_FRAME_ALIGN = 16
+
+#: Trap dispatch observation state and its own processing-core receipt log.
+TRAP_STATE_ADDRESS = 0x90A40
+TRAP_STATE_SIZE = 128
+TRAP_RECEIPT_TABLE_ADDRESS = 0x90B00
+TRAP_RECEIPT_SLOTS = 8
+
 #: Privilege level selected by the loader before entering the kernel.
 BOOT_PRIVILEGE = "machine"
 
@@ -62,5 +80,15 @@ __all__ = [
     "RECEIPT_TABLE_ADDRESS",
     "RECEIPT_SIZE",
     "RECEIPT_SLOTS",
+    "TRAP_SCRATCH_ADDRESS",
+    "TRAP_SCRATCH_SIZE",
+    "TRAP_STACK_TOP",
+    "TRAP_FRAME_ADDRESS",
+    "TRAP_FRAME_SIZE",
+    "TRAP_FRAME_ALIGN",
+    "TRAP_STATE_ADDRESS",
+    "TRAP_STATE_SIZE",
+    "TRAP_RECEIPT_TABLE_ADDRESS",
+    "TRAP_RECEIPT_SLOTS",
     "BOOT_PRIVILEGE",
 ]

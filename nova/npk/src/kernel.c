@@ -1,16 +1,22 @@
 /*
- * Minimal NPK C entry point for the boot foundation milestone.
+ * Minimal NPK C entry point.
  *
- * The assembly entry point owns all architectural setup. `npk_main` is the
- * first processing coordinator: it submits the boot-verification operation to
- * the NPK pipeline and returns success only if that operation committed and
- * completed. Later milestones expand initialization in an explicit, tested
- * order rather than advertising subsystems that do not exist yet.
+ * The assembly entry point owns all architectural setup. `npk_main` runs the
+ * boot-processing pipeline, initializes the Milestone 3 trap observation state,
+ * and returns success only when boot processing committed and completed. Trap
+ * delivery itself is driven by the real Nova vector in `trap.s`; no allocator,
+ * syscall service, device driver, scheduler, or user loader exists yet.
  */
 
 int npk_process_boot(void);
+int npk_trap_init(void);
 
 int npk_main(void)
 {
-    return npk_process_boot();
+    int status = npk_process_boot();
+
+    if (status != 0) {
+        return status;
+    }
+    return npk_trap_init();
 }
