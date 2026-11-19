@@ -122,7 +122,7 @@ Processing and scheduling are different mechanisms:
 
 Milestone 1 has a fixed boot operation and therefore no scheduler. Milestone 2
 has four operation slots and two units but still no scheduler. Cooperative
-scheduling in Milestone 7, and any later preemptive scheduling, will select
+scheduling in Milestone 8, and any later preemptive scheduling, will select
 operations for processing units; they will not replace the pipeline.
 
 ### Interaction with other subsystems
@@ -299,6 +299,17 @@ processing, no memory allocator, no scheduler, no user isolation, and no
 hardware parallelism. Receipts are kernel-to-harness evidence, not an ABI. The
 host decoders use private `NovaMachine` memory reads; those are test helpers,
 not guest kernel APIs.
+
+**Planned Object Manager (Milestone 5, NOT IMPLEMENTED).** The Winoid principle
+"everything is an object" is interpreted as a consistent contract for
+kernel-managed resources, not as one allocation per variable, register,
+instruction, or byte. After memory management provides allocation and
+address-space foundations, a planned Object Manager will investigate object
+identity, types, headers, handles, permissions, lifetime, sharing, naming,
+ownership, and cleanup. Syscalls can then expose stable object operations, which
+must enter the NPK processing pipeline rather than bypass it. The existing
+syscall numbers `SYS_OBJ_CREATE = 4`, `SYS_OBJ_SIZE = 5`, and
+`SYS_OBJ_DESTROY = 6` are preserved; their object semantics are not implemented.
 
 ## 1. Purpose and scope
 

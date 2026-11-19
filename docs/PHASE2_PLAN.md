@@ -8,7 +8,7 @@ Phase 2 is exclusively NPK development. It is not OpenWindows Nova64, NovaOW,
 Oryn integration, NVMP, a desktop, a window manager, an application port, CPU
 RTL, a replacement compiler, or an ISA redesign.
 
-This roadmap has nine milestones. That count follows the real dependency chain
+This roadmap has ten milestones. That count follows the real dependency chain
 identified in the platform audit; the candidate work areas from the Phase 2
 charter are mapped onto them without inventing empty milestones. A milestone is
 COMPLETE only when its implementation, tests, documentation, and commit are
@@ -22,11 +22,12 @@ finished. No future milestone is marked complete early.
 | 2 | Reusable processing core and operation management | COMPLETE | Typed operations, controlled lifecycle, processing-unit ownership, and receipt evidence tested |
 | 3 | Exception and trap subsystem | NOT STARTED | Register-preserving trap frame and `MRET` return test |
 | 4 | Physical and virtual memory management | NOT STARTED | Allocation, mapping, permissions, faults, and address-space isolation tested |
-| 5 | Syscall and privilege subsystem | NOT STARTED | In-kernel ABI dispatch with validation and error conversion tested |
-| 6 | Device abstraction and timer integration | NOT STARTED | Console/timer interfaces tested without invented devices |
-| 7 | Task management and cooperative scheduling | NOT STARTED | Deterministic task creation, yield, and switch tested |
-| 8 | Executable loading and user execution | NOT STARTED | `.nob` user image loads, runs, and terminates under NPK |
-| 9 | Integrated validation and Phase 2 closeout | NOT STARTED | Full regression, NPK validation, report, clean synchronized push |
+| 5 | Object Manager and Universal Object Model | PLANNED | Consistent kernel resource identity, handles, and lifetime management designed after memory foundations exist |
+| 6 | Syscall and privilege subsystem | NOT STARTED | In-kernel ABI dispatch with validation and error conversion tested |
+| 7 | Device abstraction and timer integration | NOT STARTED | Console/timer interfaces tested without invented devices |
+| 8 | Task management and cooperative scheduling | NOT STARTED | Deterministic task creation, yield, and switch tested |
+| 9 | Executable loading and user execution | NOT STARTED | `.nob` user image loads, runs, and terminates under NPK |
+| 10 | Integrated validation and Phase 2 closeout | NOT STARTED | Full regression, NPK validation, report, clean synchronized push |
 
 ## Milestone 1 — NPK architecture and boot foundation
 
@@ -235,7 +236,7 @@ kernel C dispatch code, `tests/test_npk_exceptions.py`,
 
 - Implement the documented 304-byte software trap frame.
 - Preserve all GPRs and `psr` used by the handler.
-- Dispatch by `ecode`, with `SYSTEM_CALL` classified for Milestone 5.
+- Dispatch by `ecode`, with `SYSTEM_CALL` classified for Milestone 6.
 - Save `tval` for MMU faults.
 - Return through `MRET` and verify restored privilege.
 
@@ -283,12 +284,58 @@ platform, no MMIO regions, no RAM-size model in the reference emulator.
 **Completion conditions.** Memory layout and policies documented, tests green,
 regression green, committed.
 
-## Milestone 5 — Syscall and privilege subsystem
+## Milestone 5 — Object Manager and Universal Object Model
+
+**Status:** PLANNED. This is an architectural milestone only; no implementation
+is authorized in this task.
+
+**Objective.** Define a consistent kernel-resource management contract based on
+the Winoid principle "everything is an object." Interpret this as consistent
+kernel-managed resource identity, typing, handles, permissions, and lifetime.
+It does not mean that every variable, register, instruction, or byte becomes a
+separately allocated object.
+
+**Dependencies.** Milestones 1–4.
+
+**Why here.** Memory management supplies the allocation and address-space
+foundations that object storage and sharing need. The Object Manager then
+provides stable identity, handles, and lifetime rules for kernel resources.
+Syscalls can subsequently expose object operations through a stable interface
+without baking object layout into the ABI. Future object operations must be
+admitted as NPK operations and processed through the existing
+`ADMIT → VALIDATE → EXECUTE → COMMIT → COMPLETE` pipeline, including rejection,
+failure, and receipt evidence.
+
+**Architectural candidates, not implemented claims.** processes, threads,
+memory regions, address spaces, devices, files, events, timers, communication
+ports, and security/access tokens.
+
+**Design questions to review before implementation.**
+
+- Object identity and type safety.
+- Object headers and metadata; the binary layout is explicitly not frozen.
+- Handles and handle tables.
+- Reference and handle lifetime semantics.
+- Creation, opening, closing, querying, referencing, dereferencing, and
+  destruction.
+- Access permissions and sharing between processes.
+- Optional object naming and parent/child ownership where appropriate.
+- Processing-pipeline integration, failure receipts, and resource cleanup.
+
+**Nova ABI constraint.** Preserve the existing syscall numbers
+`SYS_OBJ_CREATE = 4`, `SYS_OBJ_SIZE = 5`, and `SYS_OBJ_DESTROY = 6`. Their
+object semantics are not implemented by this planned milestone description.
+
+**Completion conditions (future).** A reviewed object contract, processing-core
+integration, tests, documentation, and a scoped commit. No object-manager code
+is part of the Milestone 3 implementation.
+
+## Milestone 6 — Syscall and privilege subsystem
 
 **Objective.** Implement the in-kernel syscall dispatcher while preserving Nova
 syscall ABI v1.0.
 
-**Dependencies.** Milestones 1–4.
+**Dependencies.** Milestones 1–5.
 
 **Files likely to change.** `nova/npk/syscalls.py`, kernel dispatch code,
 `tests/test_npk_syscalls.py`, `docs/NPK_ARCHITECTURE.md`.
@@ -313,12 +360,12 @@ invalid input cannot read or write kernel memory.
 **Completion conditions.** Dispatch contract documented, tests green,
 regression green, committed.
 
-## Milestone 6 — Device abstraction and timer integration
+## Milestone 7 — Device abstraction and timer integration
 
 **Objective.** Provide generic device interfaces only for capabilities the
 platform genuinely has.
 
-**Dependencies.** Milestones 1–5.
+**Dependencies.** Milestones 1–6.
 
 **Files likely to change.** `nova/npk/devices.py`, console/timer backends,
 `tests/test_npk_devices.py`, architecture docs.
@@ -341,12 +388,12 @@ keyboard, disk, or network model.
 **Completion conditions.** Device contract documented, tests green, regression
 green, committed.
 
-## Milestone 7 — Task management and cooperative scheduling
+## Milestone 8 — Task management and cooperative scheduling
 
 **Objective.** Implement tasks, states, ready queues, `SYS_YIELD`, and context
 switching without claiming preemption prematurely.
 
-**Dependencies.** Milestones 1–6.
+**Dependencies.** Milestones 1–7.
 
 **Files likely to change.** `nova/npk/tasks.py`, scheduler/context code,
 `tests/test_npk_tasks.py`, architecture docs.
@@ -369,11 +416,11 @@ host model is not NPK's scheduler; no threads/processes split yet.
 **Completion conditions.** Task model documented, tests green, regression green,
 committed.
 
-## Milestone 8 — Executable loading and user execution
+## Milestone 9 — Executable loading and user execution
 
 **Objective.** Load and run user `.nob` images under NPK.
 
-**Dependencies.** Milestones 1–7.
+**Dependencies.** Milestones 1–8.
 
 **Files likely to change.** `nova/npk/loader.py`, user stack/entry setup,
 `tests/test_npk_loader.py`, examples, architecture docs.
@@ -397,11 +444,11 @@ and terminates deterministically.
 **Completion conditions.** Loader contract documented, tests green, regression
 green, committed.
 
-## Milestone 9 — Integrated validation and Phase 2 closeout
+## Milestone 10 — Integrated validation and Phase 2 closeout
 
 **Objective.** Harden, document, and close Phase 2 with repeatable validation.
 
-**Dependencies.** Milestones 1–8.
+**Dependencies.** Milestones 1–9.
 
 **Files likely to change.** `scripts/npk_validate.py`,
 `docs/PHASE2_COMPLETION.md`, all NPK docs, README, package metadata.
@@ -419,7 +466,7 @@ documentation complete, `master` clean and equal to `origin/master`.
 **Known limitations.** Physical hardware, desktop/OpenWindows work, and Phase 3
 remain out of scope.
 
-**Completion conditions.** Closeout report committed and pushed; no milestone 10
+**Completion conditions.** Closeout report committed and pushed; no milestone 11
 created without explicit authorization.
 
 ## Rules for all milestones

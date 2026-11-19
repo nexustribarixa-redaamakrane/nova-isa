@@ -174,7 +174,7 @@ the emulator translator.
 
 These are host-side reference implementations. The emulator does not dispatch
 them. NPK will preserve the numbering and conventions and implement kernel-side
-dispatch in Milestone 5.
+dispatch in Milestone 6.
 
 Known reference-model inaccuracies to avoid inheriting silently: `SYS_WRITE`
 reads raw memory rather than translating a virtual buffer; `SYS_EXIT` discards
