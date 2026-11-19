@@ -119,8 +119,10 @@ Floating types exist only in the semantic model; floating-point lowering,
 bit-field access, VLAs, and PIC/GOT remain unsupported. Variadic access and a
 scoped `libnova` are implemented. All seven Phase 1 milestones are complete,
 tested, documented, and committed; `scripts/phase1_validate.py` is green and
-`docs/PHASE1_COMPLETION.md` is the completion report. Phase 2 remains blocked
-until separately authorized.
+`docs/PHASE1_COMPLETION.md` is the completion report. Phase 2 is now
+AUTHORIZED and is the NPK — Nova Processed Kernel — project; see
+`docs/NPK_INITIATION_REPORT.md`, `docs/NPK_ARCHITECTURE.md`, and
+`docs/PHASE2_PLAN.md`.
 
 ## 4. Blocking gaps for a kernel
 
@@ -167,5 +169,6 @@ gone.
 freestanding C toolchain with a runtime; it is still not a hosted C environment
 or a kernel platform.** Phase 1 is 7/7 (100%) and the completion report is
 `docs/PHASE1_COMPLETION.md`. A kernel still needs a boot contract, device model,
-and privilege routing; OpenWindows arm64 and hardware remain later, separate
-efforts. Phase 2 requires explicit authorization and has not been started.
+and privilege routing; NPK is now designing and implementing those foundations
+under Phase 2. OpenWindows arm64 and hardware remain later, separate
+efforts.
