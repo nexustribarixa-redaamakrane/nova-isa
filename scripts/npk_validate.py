@@ -4,8 +4,8 @@ Run from the repository root::
 
     python scripts/npk_validate.py
 
-The script runs the NPK boot/build tests first, then the unchanged Phase 1
-regression suite. It exits 0 only when both stages pass.
+The script runs the NPK boot/build and processing-core tests first, then the
+unchanged Phase 1 regression suite. It exits 0 only when both stages pass.
 """
 
 from __future__ import annotations
@@ -18,7 +18,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 STAGES = [
-    ("npk", [sys.executable, "-m", "pytest", "-q", "tests/test_npk.py"]),
+    (
+        "npk",
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "tests/test_npk.py",
+            "tests/test_npk_core.py",
+        ],
+    ),
     ("phase1", [sys.executable, "scripts/phase1_validate.py"]),
 ]
 
