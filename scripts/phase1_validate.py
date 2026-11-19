@@ -38,10 +38,11 @@ GROUPS = [
     ("codegen", ["tests/test_cc_codegen.py"], ()),
     ("driver", ["tests/test_cc_driver.py"], ()),
     ("runtime", ["tests/test_runtime.py"], (
-        "not Libnova and not Variadic and not DriverIntegration",)),
-    ("library", ["tests/test_runtime.py"], ("Libnova",)),
+        "not TestLibnova and not TestVariadic "
+        "and not TestDriverIntegration",)),
+    ("library", ["tests/test_runtime.py"], ("TestLibnova",)),
     ("end_to_end", ["tests/test_runtime.py"], (
-        "Variadic or DriverIntegration",)),
+        "TestVariadic or TestDriverIntegration",)),
     ("emulator", [
         "tests/test_instruction_table.py",
         "tests/test_preprocessor.py",

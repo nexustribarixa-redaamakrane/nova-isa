@@ -20,7 +20,7 @@ needed.
 | 3 | `codegen` | Assembly shape, ABI chunks, variadic lowering, switch-in-if, end-to-end programs | 59 passed |
 | 4 | `driver` | CLI surface, file handling, multi-TU links, range diagnostics, emulator runs | 55 passed |
 | 5 | `runtime` | Runtime package, startup contract, syscall wrappers, header compilation, diagnostics | 15 passed |
-| 6 | `library` | `mem*`, `str*`, `atoi`, `strtol`, `strtoul` | 3 passed |
+| 6 | `library` | `mem*`, `str*`, `atoi`, `strtol`, `strtoul` | 1 passed |
 | 7 | `end_to_end` | Variadics, `printf`, and driver/runtime integration | 13 passed |
 | 8 | `example` | `examples/hello_runtime.c` compiled, linked, loaded, and executed | 1 passed |
 | 9 | `conformance` | Hardware-independent Nova architecture vectors | 18/18 passed |

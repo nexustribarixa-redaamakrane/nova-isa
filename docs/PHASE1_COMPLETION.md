@@ -162,7 +162,7 @@ include precedence.
 
 **Status: delivered.** `scripts/phase1_validate.py` runs 11 ordered stages.
 Latest result: frontend 180, sema 85, codegen 59, driver 55, runtime 15,
-library 3, end-to-end 13, example 1, conformance 18/18, `compileall` passed,
+library 1, end-to-end 13, example 1, conformance 18/18, `compileall` passed,
 full suite 2245 passed, overall **PASS**. See `docs/VALIDATION.md`.
 
 ## 22. Packaging
