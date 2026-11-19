@@ -1,6 +1,7 @@
 # NPK — Nova Processed Kernel architecture
 
-**Status:** authoritative Phase 2 architecture baseline.  
+**Status:** authoritative Phase 2 architecture baseline; Milestone 2 processing
+core implemented.  
 **Kernel:** NPK — Nova Processed Kernel.  
 **Classification:** Winoid.  
 **Phase:** Phase 2, NPK only. Phase 3 and OpenWindows work are out of scope.
@@ -92,14 +93,16 @@ or claimed here.
 
 ### Components responsible for processing
 
-| Component | Responsibility | Milestone 1 status |
+| Component | Responsibility | Status |
 | --- | --- | --- |
-| Operation producers | Create typed work from boot/trap/syscall/device/loader events | Boot producer only |
-| `NpkOperation` | Carries operation code, input, output, status, and stage cursor | Implemented in C |
-| Processing unit `PU0` | Owns the active operation and drives stage advancement | Implemented in C |
-| Stage functions | Implement the five stage invariants separately | Implemented for boot verification |
-| Receipt memory | Publishes stage trace and terminal result for host observation | Implemented at `0x90008` |
-| Processing coordinator | Submits work and checks the terminal result | Implemented in `npk_main` |
+| Operation producers | Create typed work from boot/trap/syscall/device/loader events | Boot producer only; general admission API in Milestone 2 |
+| `NpkOperation` | Carries operation code, input, stage cursor, provisional result, result, reason, and receipt index | Generalized typed records in Milestone 2 |
+| Processing units `PU0`/`PU1` | Own one operation each and drive stage advancement | Two sequential units in Milestone 2 |
+| Stage handlers | Implement validate/execute/commit invariants per operation type | Boot and diagnostic types in Milestone 2 |
+| Admission interface | Validates id/type, rejects duplicates, assigns a free unit, and emits a receipt | Implemented in Milestone 2 |
+| Receipt memory | Publishes stage trace and terminal result for host observation | Fixed boot receipt at `0x90008`; 12-slot log at `0x90220` |
+| Core/operation snapshots | Expose counters, unit state, and operation slots to host tests | Implemented in Milestone 2 |
+| Processing coordinator | Submits work and checks the terminal result | `npk_main` plus the Milestone 2 self-test |
 | Scheduler | Chooses which unit/operation receives CPU time | Not implemented |
 
 Milestone 1 source layout separates the kernel entry from this mechanism:
@@ -117,9 +120,10 @@ Processing and scheduling are different mechanisms:
   stage progress is part of the operation record, not an implicit call stack;
 - a scheduler must not skip a stage or promote an unvalidated operation.
 
-Milestone 1 has a fixed boot operation and therefore no scheduler. Cooperative
-and later preemptive scheduling in Milestones 6 and 8 will select operations for
-processing units; they will not replace the pipeline.
+Milestone 1 has a fixed boot operation and therefore no scheduler. Milestone 2
+has four operation slots and two units but still no scheduler. Cooperative
+scheduling in Milestone 7, and any later preemptive scheduling, will select
+operations for processing units; they will not replace the pipeline.
 
 ### Interaction with other subsystems
 
@@ -147,9 +151,11 @@ implemented and tested:
 - a stable extension point for future trap, syscall, device, task, and loader
   operations without changing the Phase 1 ABI or ISA.
 
-Milestone 1 guarantees only these properties for boot verification. It does not
-guarantee transactional rollback, isolation, preemption, multiprocessing, or
-general syscall/device processing.
+Milestone 1 guarantees these properties for boot verification. Milestone 2
+extends them to four typed operation slots, two sequentially owned processing
+units, explicit commit publication, and receipt-backed evidence for rejection
+and failure paths. Neither milestone guarantees transactional rollback,
+isolation, preemption, multiprocessing, or general syscall/device processing.
 
 ### Difference from a conventional kernel
 
@@ -201,6 +207,98 @@ The Milestone 1 receipt is defined as follows:
 
 The receipt is a kernel-to-harness observability structure, not a new syscall,
 ISA facility, or executable format.
+
+### Milestone 2 reusable processing core
+
+Milestone 2 generalizes the single boot pipeline into a reusable core while
+keeping the Milestone 1 receipt byte-for-byte compatible. The generic core lives
+in `nova/npk/src/processing.c`; host-side decoding and validation live in
+`nova/npk/core.py`. Two operation types are implemented: `NPK_OP_BOOT_VERIFY`
+(the Milestone 1 operation) and `NPK_OP_CORE_DIAGNOSTIC` (a test-only type used
+to exercise rejection and failure paths).
+
+**Typed operation record.** Each of the four slots holds an id, type, stage,
+state, owning processing unit, input, provisional output, published result,
+reason, outcome, and receipt index. Admission rejects id `0`, unknown types,
+duplicate live ids, a full slot table, no free unit, and receipt-table
+exhaustion. A successful admission records `ADMIT` immediately and assigns a
+unit; an admission failure emits a stage-zero rejection receipt with
+`pu = 0xFFFFFFFFFFFFFFFF` and a specific reason.
+
+**Controlled lifecycle.** The only legal forward path is:
+
+```text
+FREE --admit--> ADMITTED --validate--> VALIDATED --execute--> EXECUTED
+    --commit--> COMMITTED --complete--> COMPLETE --release--> FREE
+```
+
+`VALIDATE` may terminate as `REJECTED`; `EXECUTE` and `COMMIT` may terminate as
+`FAILED`. Terminal operations cannot be advanced again, and a non-terminal
+operation cannot be released. `npk_core_advance_as(slot, pu)` enforces unit
+ownership; `npk_core_advance(slot)` derives the requested unit from the
+operation record. No stage can be skipped, repeated, or reordered.
+
+**Processing units.** `PU0` and `PU1` are logical owners with `IDLE`/`BUSY`
+state. Admission selects the first idle unit; both units busy yields
+`NPK_ERR_UNIT_UNAVAILABLE`. Release is only valid for a terminal operation and
+returns the unit to `IDLE`. The units are advanced sequentially by the single
+machine-mode execution thread. This model does not claim SMP, harts,
+preemption, or parallel execution.
+
+**Commit semantics.** `EXECUTE` computes into `op->provisional`. The commit
+handler publishes `op->result` only when its own check succeeds; a failed commit
+leaves the published result zero and records a `FAILED` receipt. Commit is a
+defined visibility point for the modeled operation and receipt state only. It
+is **not** a transactional commit: there is no rollback, journal, isolation, or
+durability guarantee, and no general memory or device side effects are performed
+by Milestone 2 operations.
+
+**Observation regions.** All regions are fixed, eight-byte-word aligned, and
+outside the kernel image and boot stack:
+
+| Region | Address | Size | Purpose |
+| --- | --- | --- | --- |
+| Core state | `0x90080` | 144 bytes | Magic/version, counters, last statuses, self-test status, unit state and unit operation ids |
+| Operation snapshots | `0x90120` | 4 × 64 bytes | One snapshot per operation slot |
+| Receipt log | `0x90220` | 12 × 128 bytes | Append-only evidence of admissions, rejections, failures, and completions |
+
+Core state word offsets: `0` magic `0x4E504B43`, `8` version `2`, `16` slot
+count `4`, `24` unit count `2`, `32` admitted, `40` rejected, `48` failed, `56`
+completed, `64` last admission status, `72` last admission reason, `80` last PU
+status, `88` last transition status, `96` self-test status, `104` reserved,
+`112`/`120` unit states, and `128`/`136` unit operation ids.
+
+Operation snapshot word offsets within each 64-byte slot: `0` id, `8` type,
+`16` stage, `24` state, `32` pu, `40` result, `48` reason, `56` reserved. A free
+slot has id/type/stage/state/result/reason zero and `pu = NO_INDEX`.
+
+Receipt word offsets within each 128-byte slot: `0` magic `0x4E504B52`, `8` id,
+`16` type, `24` pu, `32` final stage, `40` final state, `48` outcome, `56`
+result, `64` reason, `72..104` five stage-trace words, `112`/`120` reserved.
+Stage codes are `0` none, `1` admit, `2` validate, `3` execute, `4` commit, `5`
+complete. Outcome codes are `0` none, `1` pending, `2` complete, `3` rejected,
+`4` failed. State codes are `0` free, `1` admitted, `2` validated, `3` executed,
+`4` committed, `5` complete, `6` rejected, `7` failed. Reason `0` means no
+reason; `1..8` cover admission faults, `9..11` cover the diagnostic
+validate/execute/commit failures, and `12..13` are reserved contract/output
+reasons.
+
+**Kernel self-test evidence.** After the boot operation, the core self-test
+produces twelve receipts: a complete boot, a complete diagnostic, a validation
+rejection, an execution failure, a commit failure, a complete operation plus a
+duplicate-id rejection, two complete operations on different units, an
+unavailable-unit rejection, and two final complete operations. The final core
+state is `admitted=10`, `completed=7`, `rejected=3`, `failed=2`,
+`selftest_status=0`, and both units `IDLE`. Tests validate each receipt's magic,
+operation, unit, stage trace, outcome, result, and reason independently of the
+kernel's `a0` return value.
+
+**Milestone 2 limitations.** There is no trap/syscall/device/task/loader
+producer, no general operation queue beyond four slots, no interrupt-driven
+processing, no memory allocator, no scheduler, no user isolation, and no
+hardware parallelism. Receipts are kernel-to-harness evidence, not an ABI. The
+host decoders use private `NovaMachine` memory reads; those are test helpers,
+not guest kernel APIs.
 
 ## 1. Purpose and scope
 
@@ -291,8 +389,9 @@ NPK
 ```
 
 Milestone 1 creates the Core, Boot, Processing, Architecture, and Debugging
-foundations needed for a reproducible boot image. Empty directories for the
-other subsystems are deliberately not created.
+foundations needed for a reproducible boot image. Milestone 2 generalizes the
+Processing subsystem into the reusable operation core described above. Empty
+directories for the other subsystems are deliberately not created.
 
 ## 5. Kernel image and boot contract
 
@@ -365,6 +464,10 @@ addresses are identical. The initial layout is:
 | Exception vector | link-computed inside the image | `vbar` target installed by `_npk_start` |
 | Boot stack | top `0x80000`, grows down | Kernel stack before a real allocator exists |
 | Boot marker | `0x90000` | 8-byte handshake word written by `_npk_start` |
+| Fixed boot receipt | `0x90008` | Milestone 1 receipt, 96 bytes, preserved by the generic boot operation |
+| Core state | `0x90080` | Milestone 2 core snapshot, 144 bytes |
+| Operation snapshots | `0x90120` | Four 64-byte operation-slot snapshots |
+| Receipt log | `0x90220` | Twelve 128-byte processing receipts |
 | Unmapped/unused | elsewhere | No RAM bound is modeled by the emulator |
 
 The boot marker value is `0x4E504B31` (`"NPK1"`). It proves that the kernel

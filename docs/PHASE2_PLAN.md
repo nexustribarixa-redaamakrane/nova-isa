@@ -8,7 +8,7 @@ Phase 2 is exclusively NPK development. It is not OpenWindows Nova64, NovaOW,
 Oryn integration, NVMP, a desktop, a window manager, an application port, CPU
 RTL, a replacement compiler, or an ISA redesign.
 
-This roadmap has eight milestones. That count follows the real dependency chain
+This roadmap has nine milestones. That count follows the real dependency chain
 identified in the platform audit; the candidate work areas from the Phase 2
 charter are mapped onto them without inventing empty milestones. A milestone is
 COMPLETE only when its implementation, tests, documentation, and commit are
@@ -19,13 +19,14 @@ finished. No future milestone is marked complete early.
 | # | Milestone | Status | Gate |
 | --- | --- | --- | --- |
 | 1 | NPK architecture and boot foundation | COMPLETE | Bootable deterministic `.nob` kernel image that processes and receipt-verifies boot work on `NovaMachine` |
-| 2 | Exception and trap subsystem | NOT STARTED | Register-preserving trap frame and `MRET` return test |
-| 3 | Physical and virtual memory management | NOT STARTED | Allocation, mapping, permissions, faults, and address-space isolation tested |
-| 4 | Syscall and privilege subsystem | NOT STARTED | In-kernel ABI dispatch with validation and error conversion tested |
-| 5 | Device abstraction and timer integration | NOT STARTED | Console/timer interfaces tested without invented devices |
-| 6 | Task management and cooperative scheduling | NOT STARTED | Deterministic task creation, yield, and switch tested |
-| 7 | Executable loading and user execution | NOT STARTED | `.nob` user image loads, runs, and terminates under NPK |
-| 8 | Integrated validation and Phase 2 closeout | NOT STARTED | Full regression, NPK validation, report, clean synchronized push |
+| 2 | Reusable processing core and operation management | COMPLETE | Typed operations, controlled lifecycle, processing-unit ownership, and receipt evidence tested |
+| 3 | Exception and trap subsystem | NOT STARTED | Register-preserving trap frame and `MRET` return test |
+| 4 | Physical and virtual memory management | NOT STARTED | Allocation, mapping, permissions, faults, and address-space isolation tested |
+| 5 | Syscall and privilege subsystem | NOT STARTED | In-kernel ABI dispatch with validation and error conversion tested |
+| 6 | Device abstraction and timer integration | NOT STARTED | Console/timer interfaces tested without invented devices |
+| 7 | Task management and cooperative scheduling | NOT STARTED | Deterministic task creation, yield, and switch tested |
+| 8 | Executable loading and user execution | NOT STARTED | `.nob` user image loads, runs, and terminates under NPK |
+| 9 | Integrated validation and Phase 2 closeout | NOT STARTED | Full regression, NPK validation, report, clean synchronized push |
 
 ## Milestone 1 — NPK architecture and boot foundation
 
@@ -120,12 +121,111 @@ pipeline rather than merely boot a conventional call chain.
 source and helpers committed, tests and validation script green, documentation
 updated, and clean synchronized `origin/master`.
 
-## Milestone 2 — Exception and trap subsystem
+## Milestone 2 — Reusable processing core and operation management
+
+**Status:** COMPLETE.
+
+**Objective.** Generalize the Milestone 1 boot pipeline into a reusable NPK
+processing core with typed operation records, controlled lifecycle transitions,
+processing-unit ownership, explicit commit semantics, and receipt-backed
+evidence for success, rejection, and failure. The Milestone 1 boot contract must
+remain byte-for-byte compatible.
+
+**Dependencies.** Milestone 1 complete.
+
+**Files changed.**
+
+- `nova/npk/src/processing.c`: generic operations, units, stage handlers,
+  receipt log, snapshots, core self-test, and boot synchronization.
+- `nova/npk/core.py`: host-side core state/snapshot/receipt decoding and
+  independent validation.
+- `nova/npk/boot.py`: boot result now carries the decoded core snapshot and uses
+  a step budget large enough for the full self-test.
+- `nova/npk/build.py`: `--long-calls` compiler option for cross-object calls.
+- `nova/npk/layout.py`: Milestone 2 observation-region constants.
+- `nova/npk/__init__.py`: public exports for core constants and helpers.
+- `tests/test_npk_core.py`: comprehensive processing-core tests.
+- `scripts/npk_validate.py`: runs both NPK test files.
+- `docs/NPK_ARCHITECTURE.md`, `docs/PHASE2_PLAN.md`.
+
+**Implementation scope.**
+
+- Four typed operation slots with ids, types, inputs, stage/state cursors,
+  provisional and published results, reasons, outcomes, and receipt indices.
+- Two logical processing units (`PU0`, `PU1`) with admission selection, busy/idle
+  state, ownership enforcement, and terminal-only release.
+- Admission validation for zero ids, unknown types, duplicate live ids, no free
+  slot, no free unit, and receipt exhaustion, each with a specific reason.
+- Controlled `ADMIT → VALIDATE → EXECUTE → COMMIT → COMPLETE` state machine with
+  distinct `REJECTED` and `FAILED` terminal outcomes; no skipped stages and no
+  advancement after a terminal state.
+- Direct type dispatch for boot and diagnostic operations; no function-pointer
+  indirection is claimed.
+- `EXECUTE` writes `op->provisional`; `COMMIT` publishes `op->result` only on a
+  successful commit handler.
+- A 12-slot receipt log, four operation snapshots, and a 144-byte core snapshot
+  at fixed addresses, while preserving the 96-byte Milestone 1 receipt at
+  `0x90008`.
+- A kernel self-test that exercises complete operations, validation rejection,
+  execution failure, commit failure, duplicate ids, unavailable units, both
+  processing units, wrong-unit advancement, and incomplete-operation release.
+
+**Tests.**
+
+- Core layout regions are disjoint and above the boot stack.
+- Core counters are `admitted=10`, `completed=7`, `rejected=3`, `failed=2`,
+  with `selftest_status=0` and both units idle.
+- The Milestone 1 boot receipt and `a0 == 0` remain unchanged.
+- All twelve receipts match independently constructed expectations.
+- Complete, rejected, execution-failed, and commit-failed receipts each show the
+  exact stage, state, outcome, result, reason, and trace.
+- Duplicate-id and unavailable-unit admissions are rejected without execution.
+- Operation slots are released; unit assignment is visible in receipts.
+- Receipt-structure validation rejects invalid, incomplete, and inconsistent
+  receipts, and expectation validation rejects mismatched operations.
+- `validate_core_state` rejects wrong magic/version/dimensions, incomplete
+  self-test, busy units, retained operations, and bad counters.
+- Tampered core-magic and receipt-magic memory is detected by host decoding.
+
+**Acceptance criteria.** The kernel halts with `a0 == 0`; all NPK tests pass;
+the Phase 1 regression counts are unchanged; documentation states the limited
+commit guarantees and the sequential-unit model.
+
+**Known limitations.** Four operation slots and twelve receipt slots are fixed.
+The two processing units are modeled sequentially, not as SMP or harts. Commit
+is not transactional and provides no rollback, isolation, or durability. There
+is no trap/syscall/device/task/loader producer, no allocator, no scheduler, no
+user isolation, and no interrupt-driven processing. Receipts are host-visible
+evidence rather than an ABI, and host decoders use private machine memory reads
+as test helpers only.
+
+**Validation result.**
+
+- `python -m pytest -q tests/test_npk.py tests/test_npk_core.py`: **50 passed**
+  (9 Milestone 1 tests and 41 Milestone 2 tests).
+- `python scripts/npk_validate.py`: **PASS**.
+- `python scripts/phase1_validate.py`: **PASS**; counts unchanged (frontend 180,
+  sema 85, codegen 59, driver 55, runtime 15, library 1, end-to-end 13,
+  emulator 1831, example 1, conformance 18/18, compileall passed).
+- `python -m pytest -q`: **2295 passed** (Phase 1 baseline 2245 plus 9 Milestone 1
+  NPK tests plus 41 Milestone 2 NPK tests).
+- `python -m pytest -q tests/test_documentation.py`: **17 passed**.
+- Final core state: `admitted=10`, `completed=7`, `rejected=3`, `failed=2`,
+  `selftest_status=0`, `pu_state=(0, 0)`, `pu_operation=(0, 0)`.
+- Milestone 1 receipt unchanged: magic `0x4E504B50`, operation `1`, input
+  `0x4E504B31`, output `0x4E504B32`, status `1`, final stage `5`, trace
+  `(1, 2, 3, 4, 5)`.
+
+**Completion conditions.** Implementation, tests, documentation, and scoped
+commit complete; NPK and Phase 1 validation green; `master` clean and equal to
+`origin/master`.
+
+## Milestone 3 — Exception and trap subsystem
 
 **Objective.** Replace the placeholder vector with a real machine-mode trap
 entry, software trap frame, classification, fault reporting, and `MRET` return.
 
-**Dependencies.** Milestone 1.
+**Dependencies.** Milestones 1–2.
 
 **Files likely to change.** `nova/npk/exceptions.py`, `nova/npk/src/trap.s`,
 kernel C dispatch code, `tests/test_npk_exceptions.py`,
@@ -135,7 +235,7 @@ kernel C dispatch code, `tests/test_npk_exceptions.py`,
 
 - Implement the documented 304-byte software trap frame.
 - Preserve all GPRs and `psr` used by the handler.
-- Dispatch by `ecode`, with `SYSTEM_CALL` classified for Milestone 4.
+- Dispatch by `ecode`, with `SYSTEM_CALL` classified for Milestone 5.
 - Save `tval` for MMU faults.
 - Return through `MRET` and verify restored privilege.
 
@@ -152,13 +252,13 @@ trap frame, depth-4 hardware save stack remains architectural.
 **Completion conditions.** Trap frame layout and dispatch documented, tests
 green, regression green, committed.
 
-## Milestone 3 — Physical and virtual memory management
+## Milestone 4 — Physical and virtual memory management
 
 **Objective.** Add a declared physical RAM range, frame allocator, kernel
 page-table manager, mapping/unmapping, permissions, fault handling, and TLB
 policy wrappers.
 
-**Dependencies.** Milestones 1–2.
+**Dependencies.** Milestones 1–3.
 
 **Files likely to change.** `nova/npk/memory.py`, kernel memory C/assembly,
 `tests/test_npk_memory.py`, architecture docs.
@@ -183,12 +283,12 @@ platform, no MMIO regions, no RAM-size model in the reference emulator.
 **Completion conditions.** Memory layout and policies documented, tests green,
 regression green, committed.
 
-## Milestone 4 — Syscall and privilege subsystem
+## Milestone 5 — Syscall and privilege subsystem
 
 **Objective.** Implement the in-kernel syscall dispatcher while preserving Nova
 syscall ABI v1.0.
 
-**Dependencies.** Milestones 1–3.
+**Dependencies.** Milestones 1–4.
 
 **Files likely to change.** `nova/npk/syscalls.py`, kernel dispatch code,
 `tests/test_npk_syscalls.py`, `docs/NPK_ARCHITECTURE.md`.
@@ -213,12 +313,12 @@ invalid input cannot read or write kernel memory.
 **Completion conditions.** Dispatch contract documented, tests green,
 regression green, committed.
 
-## Milestone 5 — Device abstraction and timer integration
+## Milestone 6 — Device abstraction and timer integration
 
 **Objective.** Provide generic device interfaces only for capabilities the
 platform genuinely has.
 
-**Dependencies.** Milestones 1–4.
+**Dependencies.** Milestones 1–5.
 
 **Files likely to change.** `nova/npk/devices.py`, console/timer backends,
 `tests/test_npk_devices.py`, architecture docs.
@@ -241,12 +341,12 @@ keyboard, disk, or network model.
 **Completion conditions.** Device contract documented, tests green, regression
 green, committed.
 
-## Milestone 6 — Task management and cooperative scheduling
+## Milestone 7 — Task management and cooperative scheduling
 
 **Objective.** Implement tasks, states, ready queues, `SYS_YIELD`, and context
 switching without claiming preemption prematurely.
 
-**Dependencies.** Milestones 1–5.
+**Dependencies.** Milestones 1–6.
 
 **Files likely to change.** `nova/npk/tasks.py`, scheduler/context code,
 `tests/test_npk_tasks.py`, architecture docs.
@@ -269,11 +369,11 @@ host model is not NPK's scheduler; no threads/processes split yet.
 **Completion conditions.** Task model documented, tests green, regression green,
 committed.
 
-## Milestone 7 — Executable loading and user execution
+## Milestone 8 — Executable loading and user execution
 
 **Objective.** Load and run user `.nob` images under NPK.
 
-**Dependencies.** Milestones 1–6.
+**Dependencies.** Milestones 1–7.
 
 **Files likely to change.** `nova/npk/loader.py`, user stack/entry setup,
 `tests/test_npk_loader.py`, examples, architecture docs.
@@ -297,11 +397,11 @@ and terminates deterministically.
 **Completion conditions.** Loader contract documented, tests green, regression
 green, committed.
 
-## Milestone 8 — Integrated validation and Phase 2 closeout
+## Milestone 9 — Integrated validation and Phase 2 closeout
 
 **Objective.** Harden, document, and close Phase 2 with repeatable validation.
 
-**Dependencies.** Milestones 1–7.
+**Dependencies.** Milestones 1–8.
 
 **Files likely to change.** `scripts/npk_validate.py`,
 `docs/PHASE2_COMPLETION.md`, all NPK docs, README, package metadata.
@@ -319,7 +419,7 @@ documentation complete, `master` clean and equal to `origin/master`.
 **Known limitations.** Physical hardware, desktop/OpenWindows work, and Phase 3
 remain out of scope.
 
-**Completion conditions.** Closeout report committed and pushed; no milestone 9
+**Completion conditions.** Closeout report committed and pushed; no milestone 10
 created without explicit authorization.
 
 ## Rules for all milestones
