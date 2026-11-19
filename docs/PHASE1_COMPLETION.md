@@ -160,10 +160,11 @@ include precedence.
 
 ## 21. Repeatable validation
 
-**Status: delivered.** `scripts/phase1_validate.py` runs 11 ordered stages.
+**Status: delivered.** `scripts/phase1_validate.py` runs 12 ordered stages.
 Latest result: frontend 180, sema 85, codegen 59, driver 55, runtime 15,
-library 1, end-to-end 13, example 1, conformance 18/18, `compileall` passed,
-full suite 2245 passed, overall **PASS**. See `docs/VALIDATION.md`.
+library 1, end-to-end 13, emulator 1831, example 1, conformance 18/18,
+`compileall` passed, full suite 2245 passed, overall **PASS**. See
+`docs/VALIDATION.md`.
 
 ## 22. Packaging
 

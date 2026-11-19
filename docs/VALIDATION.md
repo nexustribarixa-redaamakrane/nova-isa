@@ -22,10 +22,11 @@ needed.
 | 5 | `runtime` | Runtime package, startup contract, syscall wrappers, header compilation, diagnostics | 15 passed |
 | 6 | `library` | `mem*`, `str*`, `atoi`, `strtol`, `strtoul` | 1 passed |
 | 7 | `end_to_end` | Variadics, `printf`, and driver/runtime integration | 13 passed |
-| 8 | `example` | `examples/hello_runtime.c` compiled, linked, loaded, and executed | 1 passed |
-| 9 | `conformance` | Hardware-independent Nova architecture vectors | 18/18 passed |
-| 10 | `compileall` | Python syntax check for `nova`, `tests`, `scripts` | passed |
-| 11 | `full_suite` | Entire pytest suite as a final regression gate | 2245 passed |
+| 8 | `emulator` | Instruction table, assembler, objects, linker, CSR, traps, CLI, examples, docs | 1831 passed |
+| 9 | `example` | `examples/hello_runtime.c` compiled, linked, loaded, and executed | 1 passed |
+| 10 | `conformance` | Hardware-independent Nova architecture vectors | 18/18 passed |
+| 11 | `compileall` | Python syntax check for `nova`, `tests`, `scripts` | passed |
+| 12 | `full_suite` | Entire pytest suite as a final regression gate | 2245 passed |
 
 The disjoint `runtime`, `library`, and `end_to_end` selections use pytest `-k`
 expressions over `tests/test_runtime.py`, so their counts can be reported

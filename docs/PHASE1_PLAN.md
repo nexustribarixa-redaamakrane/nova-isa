@@ -495,10 +495,10 @@ milestones now complete, Phase 2 still requires separate explicit authorization.
 - **Driver:** `--runtime`, `--nostartfiles`, and `--nostdlib` are link-mode
   options. Runtime links imply long calls/branches for user sources and add the
   built-in runtime include path behind user `-I` directories.
-- **Validation:** `scripts/phase1_validate.py` runs 11 ordered stages. Latest
-  result: frontend 180, sema 85, codegen 59, driver 55, runtime 15, library 3,
-  end-to-end 13, example 1, example output exact, conformance 18/18,
-  `compileall` clean, full suite 2245 passed, overall PASS. See
+- **Validation:** `scripts/phase1_validate.py` runs 12 ordered stages. Latest
+  result: frontend 180, sema 85, codegen 59, driver 55, runtime 15, library 1,
+  end-to-end 13, emulator 1831, example 1, example output exact, conformance
+  18/18, `compileall` clean, full suite 2245 passed, overall PASS. See
   `docs/VALIDATION.md` and `docs/PHASE1_COMPLETION.md`.
 - **Intentional non-goals:** hosted C, full ISO C conformance, input streams,
   allocation, FP/soft-float, PIC/GOT, automatic relaxation, kernel/device
