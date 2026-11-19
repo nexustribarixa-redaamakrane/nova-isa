@@ -20,7 +20,7 @@ finished. No future milestone is marked complete early.
 | --- | --- | --- | --- |
 | 1 | NPK architecture and boot foundation | COMPLETE | Bootable deterministic `.nob` kernel image that processes and receipt-verifies boot work on `NovaMachine` |
 | 2 | Reusable processing core and operation management | COMPLETE | Typed operations, controlled lifecycle, processing-unit ownership, and receipt evidence tested |
-| 3 | Exception and trap subsystem | NOT STARTED | Register-preserving trap frame and `MRET` return test |
+| 3 | Exception and trap subsystem | COMPLETE | Register-preserving trap frame and `MRET` return test |
 | 4 | Physical and virtual memory management | NOT STARTED | Allocation, mapping, permissions, faults, and address-space isolation tested |
 | 5 | Object Manager and Universal Object Model | PLANNED | Consistent kernel resource identity, handles, and lifetime management designed after memory foundations exist |
 | 6 | Syscall and privilege subsystem | NOT STARTED | In-kernel ABI dispatch with validation and error conversion tested |
@@ -223,35 +223,101 @@ commit complete; NPK and Phase 1 validation green; `master` clean and equal to
 
 ## Milestone 3 — Exception and trap subsystem
 
-**Objective.** Replace the placeholder vector with a real machine-mode trap
-entry, software trap frame, classification, fault reporting, and `MRET` return.
+**Status:** COMPLETE.
+
+**Objective.** Replace the placeholder vector with a real machine-mode Nova
+assembly trap entry, exact software trap frame, typed processing-core dispatch,
+classification, fault reporting, and `MRET` return while preserving Milestone 1
+and Milestone 2 behavior.
 
 **Dependencies.** Milestones 1–2.
 
-**Files likely to change.** `nova/npk/exceptions.py`, `nova/npk/src/trap.s`,
-kernel C dispatch code, `tests/test_npk_exceptions.py`,
-`docs/NPK_ARCHITECTURE.md`.
+**Files changed.**
+
+- `nova/npk/src/trap.s`: real Nova assembly exception entry, 304-byte frame
+  save/restore, separate trap stack, and `MRET`.
+- `nova/npk/src/trap.c`: trap state initialization, classification, typed
+  operation validation/execute/commit handlers, and dispatch.
+- `nova/npk/src/npk_core.h`: operation layout shared by C translation units.
+- `nova/npk/src/processing.c`: `NPK_OP_TRAP_PROCESS`, type-specific receipt
+  routing, and trap receipt log.
+- `nova/npk/src/kernel.c`, `nova/npk/src/start.s`: initialize trap state and
+  remove the placeholder vector.
+- `nova/npk/layout.py`, `nova/npk/core.py`, `nova/npk/traps.py`,
+  `nova/npk/__init__.py`: fixed M3 regions, constants, decoders, and exports.
+- `nova/npk/build.py`: assemble and link the Nova assembly trap entry and the
+  C trap dispatcher.
+- `tests/test_npk_exceptions.py`, `scripts/npk_validate.py`: 21 real-machine
+  trap cases and repeatable validation.
+- `docs/NPK_ARCHITECTURE.md`, `docs/PHASE2_PLAN.md`,
+  `docs/NPK_INITIATION_REPORT.md`, `docs/NPK_MILESTONE3_REPORT.md`.
 
 **Implementation scope.**
 
-- Implement the documented 304-byte software trap frame.
-- Preserve all GPRs and `psr` used by the handler.
-- Dispatch by `ecode`, with `SYSTEM_CALL` classified for Milestone 6.
-- Save `tval` for MMU faults.
-- Return through `MRET` and verify restored privilege.
+- The fixed 304-byte frame at `0x90900` preserves all 32 GPRs, `psr`, `epc`,
+  `ecause`, `ecode`, the handler privilege word, and `tval`.
+- The assembly entry uses the low scratch slots at `0x200`, a separate trap
+  stack at `0x88000`, and long-call return setup for the C dispatcher.
+- `SYSTEM_CALL`, `SOFTWARE_TRAP`, illegal instruction, alignment, memory, and
+  MMU faults are classified; other assigned codes fail as unsupported; invalid
+  frames or codes are rejected.
+- Every trap is admitted as `NPK_OP_TRAP_PROCESS` and advanced through
+  `ADMIT → VALIDATE → EXECUTE → COMMIT → COMPLETE` with PU ownership and an
+  independent eight-slot trap receipt log at `0x90B00`.
+- Results are published only at `COMMIT`; `MRET` restores GPRs, `psr`, `tval`,
+  exact `epc`, privilege, and clears `ecode`.
+- No syscall service, object-manager behavior, allocator, scheduler, device,
+  loader, delegation, transactional rollback, or nested handler is implemented.
 
-**Tests.** `SCALL`, `TRAP`, illegal instruction, alignment, memory, and MMU
-faults; nested exception depth; full register preservation; return-state
-restoration.
+**Tests.**
+
+- Layout, exact frame offsets, alignment, real vector installation, and boot
+  initialization of trap observations.
+- Real `SCALL` frame capture for every GPR and exception field.
+- Full `MRET` restoration of registers, `psr`, `tval`, `epc`, `ecode`,
+  `ecause`, privilege, and the platform save stack.
+- `TRAP`, illegal instruction, alignment, memory, and injected MMU fault
+  classification and exact resume PC.
+- Invalid `ecode`, malformed frame, unsupported class, and corrupt trap-state
+  rejection/failure receipts without result publication.
+- Independent trap receipt validation without disturbing Milestone 1 or
+  Milestone 2 receipts and counters.
+- Platform exception-stack depth four with oldest-frame discard.
+- Preservation of syscall numbers 4, 5, and 6 for the planned Object Manager.
+- Documentation checks for frame size, `MRET`, and nesting limitations.
 
 **Acceptance criteria.** Every handler test proves register/CSR state and exact
-resumption PC; no trap is silently swallowed.
+resumption PC; no trap is silently swallowed; Milestone 1 and Milestone 2
+receipts and counters remain exactly unchanged.
 
-**Known limitations.** No supervisor delegation, no `SRET`/`ERET`, no hardware
-trap frame, depth-4 hardware save stack remains architectural.
+**Known limitations.** The frame is single-level and nested exception handling
+is unsupported. The platform's depth-4 internal save stack remains the only
+privilege/PC return source. The privilege word in the frame is the handler
+privilege, not saved user privilege. There is no supervisor delegation,
+`SRET`/`ERET`, hardware trap frame, syscall dispatch, or physical-hardware
+claim. MMU and unsupported-class cases use explicit host injection where the
+guest cannot provoke them deterministically in the reference model.
 
-**Completion conditions.** Trap frame layout and dispatch documented, tests
-green, regression green, committed.
+**Validation result.**
+
+- `python -m pytest -q tests/test_npk.py tests/test_npk_core.py
+  tests/test_npk_exceptions.py`: **71 passed**.
+- `python scripts/npk_validate.py`: **PASS** (NPK 71 passed; Phase 1 PASS).
+- `python scripts/phase1_validate.py`: **PASS**; counts unchanged (frontend 180,
+  sema 85, codegen 59, driver 55, runtime 15, library 1, end-to-end 13,
+  emulator 1831, example 1, conformance 18/18, compileall passed, full suite
+  2316).
+- `python -m pytest -q tests/test_documentation.py`: **17 passed**.
+- `python -m pytest -q`: **2316 passed**.
+- Milestone 1 and Milestone 2 evidence unchanged: boot receipt magic `NPKP`,
+  input `0x4E504B31`, output `0x4E504B32`, status `1`, trace `1,2,3,4,5`;
+  core counters `admitted=10`, `completed=7`, `rejected=3`, `failed=2`,
+  `selftest_status=0`, both units idle.
+- Full detail: `docs/NPK_MILESTONE3_REPORT.md`.
+
+**Completion conditions.** Trap frame layout and dispatch documented, all
+validation commands green, scoped commits created, and `master` clean and equal
+to `origin/master`.
 
 ## Milestone 4 — Physical and virtual memory management
 

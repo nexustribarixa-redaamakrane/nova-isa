@@ -51,7 +51,7 @@ are preserved as the foundation for NPK.
 | Machine-only instruction and CSR checks | Implemented and tested | `emulator.py:1571-1572`, `tests/test_csr.py` |
 | Exception entry/return (`ecode`, `ecause`, `epc`, `MRET`, `IRET`) | Implemented and tested | `emulator.py:1505-1527`, `tests/test_trap_abi.py` |
 | `SCALL` and `TRAP` entry semantics | Implemented and tested for `SCALL`; Implemented but incomplete for `TRAP` runtime delivery | `SCALL` is conformance-tested; `TRAP` mostly encoding-tested |
-| Automatic GPR trap frame | Not implemented | Entry saves only an internal 4-deep `(epc, ecode, ecause, priv)` frame |
+| Automatic GPR trap frame | Not implemented by the platform; NPK software frame implemented in Milestone 3 | Platform entry saves only an internal 4-deep `(epc, ecode, ecause, priv)` frame; `trap.s` now saves all GPRs in a 304-byte kernel frame |
 | Supervisor trap delegation, `SRET`, `ERET` | Not implemented | No delegation CSR or return instruction exists |
 | CSR file (20 assigned, reserved WARL range) | Implemented and tested; per-CSR instruction coverage incomplete | `isa.py:1134-1324`, `tests/test_csr.py` |
 | Software/timer interrupts, `ie`, `ip`, `ivec`, `SIPI`, `WAIT` | Implemented and tested | `tests/test_v1_features.py:247-298` |
@@ -86,7 +86,8 @@ not unimplemented stubs to be advertised:
   supervisor kernel would require a machine-mode shim or a new delegation
   facility. `Requires emulator enhancement` for delegation.
 - **Software trap frame.** GPRs, `sp`, `psr`, and `tval` are not saved by entry.
-  NPK must implement a software frame. `Not implemented` in the platform by design.
+  This remains `Not implemented` in the platform by design; Milestone 3 adds the
+  NPK software frame in Nova assembly, not a platform facility.
 - **Memory.** No RAM-size model, frame allocator, mapping helper, MMIO regions,
   ASID, TLB shootdown, or enforced global PTE bit. `Requires emulator enhancement`.
 - **Devices.** Only syscall-based write logging and CSR timer interrupts exist.
@@ -192,7 +193,7 @@ Phase 1.
 - **Core/Boot/Architecture/Processing:** image validation, boot contract, CSR
   and vector setup, operation records, pipeline stages, processing units,
   receipts, and deterministic initialization.
-- **Exceptions:** software trap frame, dispatch, `MRET` return.
+- **Exceptions:** Milestone 3 software trap frame, typed dispatch, `MRET` return.
 - **Memory:** frame allocation, page tables, address spaces, faults, TLB.
 - **Syscalls:** ABI-compatible dispatcher with validation.
 - **Devices:** console and timer over real platform facilities only.
@@ -231,6 +232,7 @@ Milestone 1 uses bare mode:
 | Boot stack | top `0x80000`, grows down | Initial kernel stack |
 | Boot marker | `0x90000` | 8-byte `0x4E504B31` handshake |
 | Processing receipt | `0x90008`, 96 bytes | Operation stage trace and terminal result |
+| Trap frame / state / receipts | `0x90900` / `0x90A40` / `0x90B00` | Milestone 3 304-byte frame, dispatch state, and eight receipts |
 
 Future policy reserves low canonical addresses for kernel mappings and high
 canonical addresses for user spaces, with U-bit enforcement and no user access
@@ -289,18 +291,26 @@ or graphical application work is part of this subsystem.
 
 ## 15. Proposed Phase 2 milestones
 
-| # | Milestone | Gate |
-| --- | --- | --- |
-| 1 | NPK architecture and boot foundation | Deterministic bootable `.nob` kernel on `NovaMachine` |
-| 2 | Exception and trap subsystem | Register-preserving trap frame and `MRET` return |
-| 3 | Physical and virtual memory management | Allocation, mapping, permissions, faults, isolation |
-| 4 | Syscall and privilege subsystem | In-kernel ABI dispatch with validation |
-| 5 | Device abstraction and timer integration | Real console/timer interfaces only |
-| 6 | Task management and cooperative scheduling | Task states, yield, deterministic switching |
-| 7 | Executable loading and user execution | `.nob` user image runs under NPK |
-| 8 | Integrated validation and Phase 2 closeout | Full regression, report, clean synchronized push |
+The authorized roadmap has ten milestones; the corrected current map is:
 
-Details are in `docs/PHASE2_PLAN.md`.
+| # | Milestone | Status | Gate |
+| --- | --- | --- | --- |
+| 1 | NPK architecture and boot foundation | COMPLETE | Deterministic bootable `.nob` kernel on `NovaMachine` |
+| 2 | Reusable processing core and operation management | COMPLETE | Typed operations, lifecycle, unit ownership, receipts |
+| 3 | Exception and trap subsystem | COMPLETE | Register-preserving trap frame and `MRET` return |
+| 4 | Physical and virtual memory management | NOT STARTED | Allocation, mapping, permissions, faults, isolation |
+| 5 | Object Manager and Universal Object Model | PLANNED | Resource identity, handles, lifetime after memory foundations |
+| 6 | Syscall and privilege subsystem | NOT STARTED | In-kernel ABI dispatch with validation |
+| 7 | Device abstraction and timer integration | NOT STARTED | Real console/timer interfaces only |
+| 8 | Task management and cooperative scheduling | NOT STARTED | Task states, yield, deterministic switching |
+| 9 | Executable loading and user execution | NOT STARTED | `.nob` user image runs under NPK |
+| 10 | Integrated validation and Phase 2 closeout | NOT STARTED | Full regression, report, clean synchronized push |
+
+Milestone 5 is deliberately placed after memory management: memory supplies
+allocation and address-space foundations, the Object Manager then supplies
+identity, handles, and lifetime rules, and syscalls expose stable object
+operations in Milestone 6. Future object operations must enter the NPK
+pipeline. Details are in `docs/PHASE2_PLAN.md`.
 
 ## 16. Risks and blockers
 

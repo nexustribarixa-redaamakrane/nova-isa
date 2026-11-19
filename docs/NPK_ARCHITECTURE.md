@@ -1,7 +1,7 @@
 # NPK — Nova Processed Kernel architecture
 
 **Status:** authoritative Phase 2 architecture baseline; Milestone 2 processing
-core implemented.  
+core and Milestone 3 exception/trap subsystem implemented.  
 **Kernel:** NPK — Nova Processed Kernel.  
 **Classification:** Winoid.  
 **Phase:** Phase 2, NPK only. Phase 3 and OpenWindows work are out of scope.
@@ -95,19 +95,21 @@ or claimed here.
 
 | Component | Responsibility | Status |
 | --- | --- | --- |
-| Operation producers | Create typed work from boot/trap/syscall/device/loader events | Boot producer only; general admission API in Milestone 2 |
-| `NpkOperation` | Carries operation code, input, stage cursor, provisional result, result, reason, and receipt index | Generalized typed records in Milestone 2 |
+| Operation producers | Create typed work from boot/trap/syscall/device/loader events | Boot and trap producers implemented; syscall/device/loader producers remain future work |
+| `NpkOperation` | Carries operation code, input, stage cursor, provisional result, result, reason, and receipt index | Generalized typed records in Milestone 2; trap type added in Milestone 3 |
 | Processing units `PU0`/`PU1` | Own one operation each and drive stage advancement | Two sequential units in Milestone 2 |
-| Stage handlers | Implement validate/execute/commit invariants per operation type | Boot and diagnostic types in Milestone 2 |
-| Admission interface | Validates id/type, rejects duplicates, assigns a free unit, and emits a receipt | Implemented in Milestone 2 |
-| Receipt memory | Publishes stage trace and terminal result for host observation | Fixed boot receipt at `0x90008`; 12-slot log at `0x90220` |
-| Core/operation snapshots | Expose counters, unit state, and operation slots to host tests | Implemented in Milestone 2 |
-| Processing coordinator | Submits work and checks the terminal result | `npk_main` plus the Milestone 2 self-test |
+| Stage handlers | Implement validate/execute/commit invariants per operation type | Boot, diagnostic, and trap types implemented |
+| Admission interface | Validates id/type, rejects duplicates, assigns a free unit, and emits a receipt | Implemented in Milestone 2; trap operations use the same interface |
+| Receipt memory | Publishes stage trace and terminal result for host observation | Fixed boot receipt at `0x90008`; core log at `0x90220`; trap log at `0x90B00` |
+| Core/operation snapshots | Expose counters, unit state, and operation slots to host tests | Implemented in Milestone 2; trap state at `0x90A40` in Milestone 3 |
+| Processing coordinator | Submits work and checks the terminal result | `npk_main` plus the Milestone 2 self-test; trap dispatch in `trap.c` |
 | Scheduler | Chooses which unit/operation receives CPU time | Not implemented |
 
-Milestone 1 source layout separates the kernel entry from this mechanism:
-`nova/npk/src/start.s` establishes the machine context, `nova/npk/src/processing.c`
-implements the operation pipeline and receipt, and `nova/npk/src/kernel.c`
+Milestone 3 source layout separates the kernel entry from this mechanism:
+`nova/npk/src/start.s` establishes the machine context, `nova/npk/src/trap.s`
+is the Nova assembly trap entry and frame preserver, `nova/npk/src/trap.c`
+classifies traps and submits typed operations, `nova/npk/src/processing.c`
+implements the operation pipeline and receipts, and `nova/npk/src/kernel.c`
 submits and checks the boot verification operation.
 
 ### Relationship between processing and scheduling
@@ -129,7 +131,7 @@ operations for processing units; they will not replace the pipeline.
 
 | Subsystem | Interaction with processing |
 | --- | --- |
-| Exceptions | A trap vector classifies the event and admits an exception operation; software frame restoration happens after the operation commits or fails. |
+| Exceptions | The Nova assembly vector saves the 304-byte software frame, admits an `NPK_OP_TRAP_PROCESS` operation, classifies the event, and restores the frame before `MRET`. |
 | Memory | `VALIDATE` declares address/range/permission requirements; `EXECUTE` performs mapped operations; a fault re-enters processing as a fault event. |
 | Syscalls | The trap adapter converts the frozen ABI call into a syscall operation; validation checks number, arguments, and user pointers; commit writes the `a0`/`a1` result. |
 | Devices | Interrupt adapters admit device-event operations; no driver bypasses validation or commits directly from an interrupt handler. |
@@ -154,8 +156,12 @@ implemented and tested:
 Milestone 1 guarantees these properties for boot verification. Milestone 2
 extends them to four typed operation slots, two sequentially owned processing
 units, explicit commit publication, and receipt-backed evidence for rejection
-and failure paths. Neither milestone guarantees transactional rollback,
-isolation, preemption, multiprocessing, or general syscall/device processing.
+and failure paths. Milestone 3 extends them to machine-mode exception entry:
+every trapped event is processed through the same lifecycle before its result
+is published, and its own receipt records completion, rejection, or failure.
+None of these milestones guarantees transactional rollback, isolation,
+preemption, multiprocessing, nested exception handling, or general
+syscall/device processing.
 
 ### Difference from a conventional kernel
 
@@ -300,6 +306,74 @@ hardware parallelism. Receipts are kernel-to-harness evidence, not an ABI. The
 host decoders use private `NovaMachine` memory reads; those are test helpers,
 not guest kernel APIs.
 
+### Milestone 3 exception and trap subsystem
+
+Milestone 3 replaces the placeholder vector with a real Nova assembly trap entry
+in `nova/npk/src/trap.s`. On entry it preserves all 32 GPRs and the guest-visible
+exception state in a fixed software frame, switches to a dedicated trap stack,
+calls the C dispatcher in `nova/npk/src/trap.c`, restores the saved context, and
+returns with `MRET`. The frame is written by Nova assembly, not by generic or
+host assembly.
+
+The 304-byte frame is 16-byte aligned at `0x90900` and has this exact layout:
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| `0..248` | 256 | `gpr[0..31]`, eight bytes each |
+| `256` | 8 | `psr` |
+| `264` | 8 | `epc` |
+| `272` | 8 | `ecause` |
+| `280` | 8 | `ecode` |
+| `288` | 8 | handler privilege (`2`, machine) |
+| `296` | 8 | `tval` |
+
+The word at offset `288` is the **handler** privilege observed after exception
+entry. It is not the pre-trap privilege: that value is available only in the
+reference machine's internal exception save stack and is restored by `MRET`.
+Guest software cannot inspect saved privilege through this frame. The frame is
+single-level; nested exception handling is **not supported**, and the platform's
+depth-4 internal save stack remains an architectural limit rather than a
+multi-level NPK handler.
+
+Trap classification is by `ecode`:
+
+| `ecode` | Class | Action |
+| ---: | --- | --- |
+| `7` (`SYSTEM_CALL`) | system call | classify for the planned Milestone 6 dispatcher; resume after the call |
+| `10` (`SOFTWARE_TRAP`) | software trap | resume after the trap instruction |
+| `1` (`ILLEGAL_INSTRUCTION`), `3` (`MEMORY_FAULT`), `4` (`ALIGNMENT_FAULT`), `9` (`MMU_FAULT`) | fault | report and resume at the faulting PC |
+| other assigned codes | unsupported | fail the operation and report; do not claim a service |
+| `0` or unknown | invalid | reject the operation before publication |
+
+`SYSTEM_CALL` is only classified in Milestone 3. No syscall number is serviced,
+no `a0`/`a1` result is written, and no object-manager semantics are introduced.
+Codes `2`, `5`, `6`, `8`, and `11` are recognized as assigned but unsupported by
+this milestone and produce a distinct `FAILED` receipt.
+
+The dispatcher allocates an `NPK_OP_TRAP_PROCESS` operation through the ordinary
+admission interface and advances it through `ADMIT → VALIDATE → EXECUTE → COMMIT →
+COMPLETE`. `VALIDATE` checks the frame pointer, trap-state magic/version, legal
+`ecode`, aligned `epc`, and machine handler privilege. `EXECUTE` computes a
+provisional result only; `COMMIT` publishes it, and only then may `MRET` return.
+Malformed frames and unknown codes are `REJECTED`; unsupported classes are
+`FAILED`. Both outcomes have independent receipts and never publish a trap
+result. The PU is released only after the operation reaches a terminal state.
+
+Observation regions added in Milestone 3:
+
+| Region | Address | Size | Purpose |
+| --- | --- | --- | --- |
+| Trap scratch | `0x200` | 24 bytes | Two saved registers plus an active-trap flag used by the assembly entry |
+| Trap stack | top `0x88000` | grows down | Handler stack, separate from the boot stack |
+| Software trap frame | `0x90900` | 304 bytes | Saved GPRs and exception state |
+| Trap state | `0x90A40` | 128 bytes | Dispatch count, last frame fields, classification, action, result, receipt index, reason |
+| Trap receipt log | `0x90B00` | 8 × 128 bytes | Independent receipts for trap operations |
+
+The trap state begins with magic `0x4E504B54`, version `3`, and an initial
+dispatch count of zero. Its `last_op_slot` and `receipt_index` fields use
+`NO_INDEX` before a dispatch. Host decoders in `nova/npk/traps.py` read these
+fixed regions through `NovaMachine`; they are test helpers, not guest APIs.
+
 **Planned Object Manager (Milestone 5, NOT IMPLEMENTED).** The Winoid principle
 "everything is an object" is interpreted as a consistent contract for
 kernel-managed resources, not as one allocation per variable, register,
@@ -442,7 +516,8 @@ any C function.
 1. sets `sp` to `NPK_BOOT_STACK_TOP`;
 2. installs the exception vector address from a link-time symbol;
 3. writes the boot marker;
-4. calls `npk_main`, which submits and checks the boot verification operation;
+4. calls `npk_main`, which submits and checks the boot verification operation
+   and initializes the trap observation state;
 5. executes `HALT` with `npk_main`'s return value in `a0`.
 
 `HALT` is the Phase 2 termination mechanism. `SYS_EXIT` remains an ABI syscall
@@ -456,7 +531,7 @@ The intended order as subsystems are added is:
 2. boot marker and minimal debug state;
 3. Core initialization and panic formatting support;
 4. physical memory and kernel allocator;
-5. exception/trap frame support;
+5. exception/trap frame support (implemented in Milestone 3);
 6. syscall dispatcher;
 7. device abstraction and timer;
 8. scheduler;
@@ -479,6 +554,11 @@ addresses are identical. The initial layout is:
 | Core state | `0x90080` | Milestone 2 core snapshot, 144 bytes |
 | Operation snapshots | `0x90120` | Four 64-byte operation-slot snapshots |
 | Receipt log | `0x90220` | Twelve 128-byte processing receipts |
+| Trap scratch | `0x200` | Three 8-byte entry-scratch slots |
+| Trap stack | top `0x88000` | Separate machine-mode handler stack |
+| Trap frame | `0x90900` | Milestone 3 304-byte Nova assembly trap frame |
+| Trap state | `0x90A40` | 128-byte trap dispatch observations |
+| Trap receipt log | `0x90B00` | Eight 128-byte trap receipts |
 | Unmapped/unused | elsewhere | No RAM bound is modeled by the emulator |
 
 The boot marker value is `0x4E504B31` (`"NPK1"`). It proves that the kernel
@@ -525,35 +605,34 @@ use `PC + 4`.
 
 ### 8.2 Software trap frame
 
-NPK owns its trap frame in kernel memory. The planned layout is:
+NPK owns its trap frame in kernel memory. Milestone 3 implements the exact
+304-byte, 16-byte-aligned layout described in the Milestone 3 section above. All
+32 GPRs are saved, including the scratch registers used by the entry stub. The
+state fields save `psr`, `epc`, `ecause`, `ecode`, the handler privilege, and
+`tval`. The privilege word at offset `288` is the privilege observed **inside**
+the machine-mode handler, not the pre-trap privilege; the latter is restored by
+`MRET` from the platform's internal save stack. Hardware does not preserve GPRs,
+so the Nova assembly vector must do so before calling C.
 
-| Offset | Size | Field |
-| ---: | ---: | --- |
-| 0 | 256 | `gpr[0..31]`, each 8 bytes little-endian |
-| 256 | 8 | `psr` |
-| 264 | 8 | `epc` |
-| 272 | 8 | `ecause` |
-| 280 | 8 | `ecode` |
-| 288 | 8 | `previous_priv` |
-| 296 | 8 | `tval` |
-| 304 | — | total size, 16-byte aligned |
-
-The exception handler must preserve every register it clobbers. Hardware does
-not do this. The frame is not implemented in Milestone 1; it is the scope of a
-later exception milestone.
+The frame is single-level. Nested exceptions are not supported: a fault taken
+while the handler is active would reuse the fixed frame. The internal platform
+save stack is four entries deep and discards the oldest entry on overflow; NPK
+does not implement a deeper software stack.
 
 ### 8.3 Dispatch
 
-Epoch 1 exception dispatch will classify by `ecode` and, for `SYSTEM_CALL`, by
-`ecause`:
+Milestone 3 dispatch classifies by `ecode` and processes every class as an
+`NPK_OP_TRAP_PROCESS` operation through the full processing-core lifecycle.
+`SYSTEM_CALL` is classified for the planned Milestone 6 dispatcher but is not
+serviced. Faults report their class and resume at the saved `epc`; software
+traps and system calls resume at `epc`, which the platform sets to `PC + 4`.
+Unknown or zero `ecode` values are rejected; assigned but unsupported classes
+are failed. No result is published before `COMMIT`, and `MRET` occurs only after
+the operation reaches a terminal state.
 
-- `ILLEGAL_INSTRUCTION`, `ARITHMETIC`, `ALIGNMENT_FAULT`, `PRIVILEGE`,
-  `OBJECT_FAULT`, `MMU_FAULT`, `SOFTWARE_TRAP`, `VM_FAULT`: fault handlers;
-- `SYSTEM_CALL`: syscall dispatcher;
-- `INTERRUPT`: source-specific handler using `ecause` as the source id.
-
-`MRET` returns to `epc` and clears `ecode`; `ecause` is not restored, so the
-handler must not assume it is zero after return.
+`MRET` returns to `epc`, restores the saved privilege from the platform stack,
+and clears `ecode`; `ecause` is not restored, so guest software must not assume
+it is zero after return.
 
 ## 9. Memory management architecture
 
@@ -595,6 +674,10 @@ The future in-kernel dispatcher will:
 4. execute the operation;
 5. convert failures to the existing error convention;
 6. return through the software trap frame and `MRET`.
+
+Milestone 3 installs the trap path that will later deliver `SYSTEM_CALL`, but it
+does not implement the dispatcher: no syscall number is serviced by the kernel
+and no `a0`/`a1` result is written.
 
 The host-side `nova.syscalls.dispatch_syscall()` remains the reference-model
 helper used by Phase 1 tests. It is not an NPK kernel feature and it currently
@@ -657,7 +740,9 @@ NPK uses existing reference-model observability:
 
 - `machine.io_log` for write syscalls;
 - `machine.irq_log` and `machine.ipi_log` for interrupt/IPI evidence;
-- `machine.exception_stack()` for host-side trap-frame inspection;
+- `machine.exception_stack()` for host-side platform save-stack inspection;
+- `nova.npk.traps` for decoding the kernel-written software frame, trap state,
+  and trap receipts;
 - `nova-objdump` and `nova.disassembler` for image inspection;
 - `nova.nox` debug containers for source/line and call-frame metadata;
 - `nova-run --dump-regs` and host-side register reads;
