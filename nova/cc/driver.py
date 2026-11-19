@@ -33,6 +33,7 @@ from ..assembler import AssemblyError, assemble_object
 from ..link import DEFAULT_ENTRY_SYMBOL, DEFAULT_IMAGE_BASE, LinkError, link_objects
 from ..nob import NobError, encode_nob
 from ..object import ObjectError, encode_object, load_object
+from ..runtime import INCLUDE_DIR, runtime_objects
 from .codegen import generate
 from .diagnostics import CompileError
 from .parser import parse
@@ -139,6 +140,14 @@ def build_parser() -> argparse.ArgumentParser:
                              "(inverted short branch plus BL)")
     parser.add_argument("-e", "--entry", dest="entry", default=None, metavar="SYMBOL",
                         help=f"linker entry symbol (default: {DEFAULT_ENTRY_SYMBOL})")
+    parser.add_argument("--runtime", dest="runtime", action="store_true",
+                        help="link the freestanding Nova runtime (startup, "
+                             "syscall wrappers, and libnova)")
+    parser.add_argument("--nostartfiles", dest="nostartfiles", action="store_true",
+                        help="with --runtime, omit the runtime _start object")
+    parser.add_argument("--nostdlib", dest="nostdlib", action="store_true",
+                        help="with --runtime, omit the libnova C objects "
+                             "(syscall wrappers are still linked)")
     parser.add_argument("--version", action="version",
                         version=(f"nova-cc (Nova C compiler) {TOOLCHAIN_VERSION} "
                                  f"[{ISA_VERSION}; {LINKER_VERSION}]"))
@@ -193,6 +202,12 @@ def _validate(args: argparse.Namespace) -> Tuple[Dict[str, str], List[str]]:
         raise _UsageError("entry symbol cannot be empty")
     if args.entry is not None and args.mode != "link":
         raise _UsageError("-e/--entry is only meaningful when linking")
+    if args.runtime and args.mode != "link":
+        raise _UsageError("--runtime is only meaningful when linking")
+    if args.nostartfiles and not args.runtime:
+        raise _UsageError("--nostartfiles is only meaningful with --runtime")
+    if args.nostdlib and not args.runtime:
+        raise _UsageError("--nostdlib is only meaningful with --runtime")
 
     defines, undefines = _parse_macro_actions(args.macro_actions)
     objects = [Path(p) for p in args.inputs
@@ -286,6 +301,7 @@ def _preprocessor_options(path: Path, args: argparse.Namespace,
     return {
         "directory": str(path.parent),
         "include_paths": list(args.include_dirs),
+        "system_include_paths": [str(INCLUDE_DIR)],
         "defines": defines,
         "undefines": list(undefines),
         "language": args.std,
@@ -309,7 +325,13 @@ def _preprocess_source(path: Path, args: argparse.Namespace,
 
 def _compile_assembly(path: Path, args: argparse.Namespace,
                       defines: Dict[str, str],
-                      undefines: Sequence[str]) -> str:
+                      undefines: Sequence[str], *,
+                      long_calls: Optional[bool] = None,
+                      long_branches: Optional[bool] = None) -> str:
+    if long_calls is None:
+        long_calls = bool(args.long_calls)
+    if long_branches is None:
+        long_branches = bool(args.long_branches)
     source = _read_source(path)
     options = _preprocessor_options(path, args, defines, undefines)
     try:
@@ -326,8 +348,8 @@ def _compile_assembly(path: Path, args: argparse.Namespace,
         raise _stage_error("semantic analysis", exc) from exc
     try:
         return generate(tree, target=args.target,
-                        long_calls=bool(args.long_calls),
-                        long_branches=bool(args.long_branches))
+                        long_calls=bool(long_calls),
+                        long_branches=bool(long_branches))
     except CompileError as exc:
         raise _stage_error("code generation", exc) from exc
 
@@ -382,6 +404,12 @@ def _run(args: argparse.Namespace, defines: Dict[str, str],
         _check_output(output, inputs)
 
         objects = []
+        # Linking the runtime makes the final image large enough that ordinary
+        # fourteen-bit call/branch displacements from user code cannot be
+        # assumed.  --runtime is an explicit opt-in to a layout-independent
+        # link, so it implies the long forms; plain links keep compact calls.
+        long_calls = bool(args.long_calls or args.runtime)
+        long_branches = bool(args.long_branches or args.runtime)
         for path in inputs:
             if path.suffix.lower() == ".nobj":
                 try:
@@ -393,10 +421,17 @@ def _run(args: argparse.Namespace, defines: Dict[str, str],
                 except ObjectError as exc:
                     raise _DriverError(f"{path}: error: object: {exc}") from exc
             else:
-                assembly = _compile_assembly(path, args, defines, undefines)
+                assembly = _compile_assembly(path, args, defines, undefines,
+                                             long_calls=long_calls,
+                                             long_branches=long_branches)
                 objects.append(_assemble(path, assembly,
-                                         long_calls=bool(args.long_calls),
-                                         long_branches=bool(args.long_branches)))
+                                         long_calls=long_calls,
+                                         long_branches=long_branches))
+        if args.runtime:
+            objects.extend(runtime_objects(
+                with_startup=not args.nostartfiles,
+                with_library=not args.nostdlib,
+            ))
         entry = args.entry or DEFAULT_ENTRY_SYMBOL
         try:
             image = link_objects(objects, entry_symbol=entry,
