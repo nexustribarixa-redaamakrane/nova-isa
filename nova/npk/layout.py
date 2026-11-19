@@ -25,9 +25,19 @@ BOOT_MARKER_ADDRESS = 0x90000
 BOOT_MARKER_VALUE = 0x4E504B31  # "NPK1" in little-endian byte order
 BOOT_MARKER_SIZE = 8
 
-#: Fixed 96-byte processing receipt published by the kernel pipeline.
+#: Fixed 96-byte Milestone 1 receipt preserved for boot compatibility.
 PROCESSING_RECEIPT_ADDRESS = BOOT_MARKER_ADDRESS + BOOT_MARKER_SIZE
 PROCESSING_RECEIPT_SIZE = 96
+
+#: Milestone 2 reusable processing-core observation regions.
+CORE_STATE_ADDRESS = 0x90080
+CORE_STATE_SIZE = 144
+OP_SNAPSHOT_ADDRESS = 0x90120
+OP_SNAPSHOT_SIZE = 64
+OP_SNAPSHOT_SLOTS = 4
+RECEIPT_TABLE_ADDRESS = 0x90220
+RECEIPT_SIZE = 128
+RECEIPT_SLOTS = 12
 
 #: Privilege level selected by the loader before entering the kernel.
 BOOT_PRIVILEGE = "machine"
@@ -44,5 +54,13 @@ __all__ = [
     "BOOT_MARKER_SIZE",
     "PROCESSING_RECEIPT_ADDRESS",
     "PROCESSING_RECEIPT_SIZE",
+    "CORE_STATE_ADDRESS",
+    "CORE_STATE_SIZE",
+    "OP_SNAPSHOT_ADDRESS",
+    "OP_SNAPSHOT_SIZE",
+    "OP_SNAPSHOT_SLOTS",
+    "RECEIPT_TABLE_ADDRESS",
+    "RECEIPT_SIZE",
+    "RECEIPT_SLOTS",
     "BOOT_PRIVILEGE",
 ]

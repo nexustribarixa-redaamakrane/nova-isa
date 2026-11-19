@@ -13,6 +13,12 @@ from dataclasses import dataclass
 from ..emulator import NovaMachine
 from ..isa import EXCEPTION_CODES, PRIVILEGE_LEVELS
 from ..nob import NobImage
+from .core import (
+    NpkCoreError,
+    CoreSnapshot,
+    decode_core_snapshot,
+    validate_core_state,
+)
 from .image import validate_kernel_image
 from .layout import (
     BOOT_MARKER_ADDRESS,
@@ -44,11 +50,12 @@ class BootResult:
     status: int
     marker: int
     processing: ProcessingReceipt
+    core: CoreSnapshot
     vbar: int
     stack_pointer: int
 
 
-def boot_kernel(image: NobImage, *, max_steps: int = 10_000) -> BootResult:
+def boot_kernel(image: NobImage, *, max_steps: int = 250_000) -> BootResult:
     """Boot a validated NPK image on the reference machine."""
     validate_kernel_image(image)
     if max_steps <= 0:
@@ -85,6 +92,12 @@ def boot_kernel(image: NobImage, *, max_steps: int = 10_000) -> BootResult:
     except NpkProcessingError as exc:
         raise NpkBootError(f"invalid NPK processing receipt: {exc}") from exc
 
+    try:
+        core = decode_core_snapshot(machine)
+        validate_core_state(core.core)
+    except NpkCoreError as exc:
+        raise NpkBootError(f"invalid NPK processing core state: {exc}") from exc
+
     vbar = machine.vbar
     image_end = image.image_base + len(image.image)
     if not image.image_base <= vbar < image_end:
@@ -106,6 +119,7 @@ def boot_kernel(image: NobImage, *, max_steps: int = 10_000) -> BootResult:
         status=machine.read_register("a0"),
         marker=marker,
         processing=receipt,
+        core=core,
         vbar=vbar,
         stack_pointer=stack_pointer,
     )

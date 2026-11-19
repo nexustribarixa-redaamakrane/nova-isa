@@ -56,12 +56,13 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
     except (OSError, UnicodeDecodeError, AssemblyError) as exc:
         raise NpkBuildError(f"nova-as: {exc}") from exc
 
+    cc_options = ["--long-calls", "-c"]
     _require_ok(
-        cc_main([str(kernel_source), "-c", "-o", str(kernel_object)]),
+        cc_main([str(kernel_source), *cc_options, "-o", str(kernel_object)]),
         "nova-cc kernel",
     )
     _require_ok(
-        cc_main([str(processing_source), "-c", "-o", str(processing_object)]),
+        cc_main([str(processing_source), *cc_options, "-o", str(processing_object)]),
         "nova-cc processing",
     )
 
