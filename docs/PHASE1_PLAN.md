@@ -1,18 +1,17 @@
 # Phase 1 plan — Nova64 freestanding C compiler and libnova
 
-**Status:** active plan. This document records the compiler architecture, the
-initial supported C subset, the code-generation contract, and the order in which
-the compiler is built. It is kept in sync with `docs/PORTING_READINESS.md`.
+**Status:** completed Phase 1 plan. This document records the compiler
+architecture, the supported C subset, the code-generation contract, and the
+order in which the compiler was built. It is kept in sync with
+`docs/PORTING_READINESS.md` and `docs/PHASE1_COMPLETION.md`.
 
 The ISA remains frozen at `Nova ISA v1.0`. Phase 1 adds software only.
 
-**Current progress (6 of 7 milestones complete):** Milestones 1–6 are complete
+**Current progress (7 of 7 milestones complete):** Milestones 1–7 are complete
 (foundation, preprocessor, parser/AST, type system + semantic analysis, Nova64
-code generation, and the compiler driver/toolchain integration). Milestone 7
-(runtime, libnova and end-to-end validation) remains pending. **Phase 2 is not
-authorized until all seven milestones are complete, tested, documented, and
-committed.** Subtasks are internal stages and must not become additional major
-milestones.
+code generation, compiler driver/toolchain integration, and runtime/libnova
+with end-to-end validation). **Phase 1: 7/7 (100%). Phase 2 is not authorized.**
+Subtasks are internal stages and must not become additional major milestones.
 
 ## 1. Pipeline
 
@@ -36,8 +35,10 @@ existing tools; it does not contain a second binary encoder. Milestone 5 adds a
 complete lowering pass from the semantically analysed AST to assembly, exercised
 end-to-end through `assemble_object`, `link_objects`, and the reference
 emulator. Milestone 6 adds the `nova-cc` driver, which orchestrates those
-existing stages and writes `.i`, `.s`, `.nobj`, and `.nob` artifacts. There is
-still no runtime library (Milestone 7).
+existing stages and writes `.i`, `.s`, `.nobj`, and `.nob` artifacts. Milestone 7
+adds the freestanding runtime, `libnova`, variadic argument access, scoped
+formatted output, and repeatable validation without duplicating any existing
+toolchain stage.
 
 ### Why direct lowering instead of a separate SSA IR
 
@@ -61,8 +62,10 @@ builder would use.
 | `nova/cc/parser.py` | Recursive-descent parser with C declarator precedence | Implemented/hardened |
 | `nova/cc/sema.py` | Scopes, symbols, type checking, AST annotations | Implemented (Milestone 4) |
 | `nova/cc/codegen.py` | Nova64 assembly emission, frames, calls, ABI | Implemented (Milestone 5) |
-| `nova/cc/driver.py` | End-to-end compile pipeline and file handling | Implemented (Milestone 6) |
+| `nova/cc/driver.py` | End-to-end compile pipeline, file handling, runtime links | Implemented (Milestones 6–7) |
 | `nova/cc/__main__.py` | `python -m nova.cc` | Implemented (Milestone 6) |
+| `nova/runtime/` | Startup, syscall wrappers, headers, freestanding `libnova` | Implemented (Milestone 7) |
+| `scripts/phase1_validate.py` | Ordered Phase 1 regression validation | Implemented (Milestone 7) |
 
 `nova/cli.py` exposes `compile_main` as the `nova-cc` console script.
 
@@ -116,9 +119,9 @@ Compound statements; declarations in blocks; expression and null statements;
 ### Functions and program structure
 
 Function declarations/definitions, prototypes, `void` parameter lists, variadic
-declarations, recursion, file/function/block/prototype scopes, tag namespaces,
-and `extern`/`static` storage classes are handled at the syntax/semantic level.
-K&R old-style definitions are intentionally not a target.
+declarations and `stdarg.h` argument access, recursion, file/function/block/
+prototype scopes, tag namespaces, and `extern`/`static` storage classes are
+handled. K&R old-style definitions are intentionally not a target.
 
 ## 4. Nova64 code-generation contract (Milestone 5)
 
@@ -253,23 +256,26 @@ silently.
 - K&R old-style function definitions.
 - Non-constant global initialisers and pointer initialisers that are not a
   symbol address or string literal.
-- `va_start`/`va_arg` and full variadic ABI support; variadic declarations can
-  be parsed, but reading unnamed arguments is not implemented.
+- Unsupported variadic forms: `va_arg` of `void`, function, array, incomplete,
+  or lowering-unsupported types; `va_start` in a non-variadic function.
 - PIC/GOT addressing, automatic branch relaxation, and any
   optimizer/scheduler/register allocator. Long calls and long branches are
-  available only as the explicit `--long-calls`/`--long-branches` options.
+  explicit options; `--runtime` implies them for user sources.
 
 ## 5. Runtime and library boundary
 
 | Layer | Contents |
 | --- | --- |
-| compiler runtime | Only helpers the compiler actually emits: currently none beyond the ISA; `__nova_divdi3`/`__nova_moddi3` are reserved for builds that request trapping-free division |
-| libnova | Freestanding C library: headers, `mem*`, `str*`, integer conversion, `putchar`/`puts`/`write`, and a small `printf` when varargs support lands |
-| crt0 | `_start` that calls `main`, then `HALT` (exit code left in `a0`) |
+| compiler runtime | No helper bodies are required by this compiler: division/remainder use native ISA instructions and no `__nova_*` symbol is emitted. The contracts in `docs/COMPILER_RUNTIME.md` remain future specifications. |
+| libnova | Freestanding headers and implementations: `mem*`, `str*`, `atoi`/`strtol`/`strtoul`, `exit`/`abort`, `printf`, `putchar`, `puts`, and syscall wrappers |
+| crt0 | `_start` supplies `sp = 0x80000`, calls `main` with `LA ra`/`BL`, then `HALT` with the return value in `a0` |
 
 Compiler-generated code never assumes a hosted operating system. The only
-operating-system interface is the existing standard syscall table. None of this
-runtime layer is implemented yet.
+operating-system interface is the existing standard syscall table. Runtime
+objects are built through the existing pipeline and linked by `nova-cc
+--runtime`; `--nostartfiles` and `--nostdlib` allow targeted replacements.
+Startup, dispatch, supported library functions, and formatter limits are
+documented in `docs/RUNTIME.md`.
 
 ## 6. Seven-milestone Phase 1 roadmap and gates
 
@@ -284,12 +290,13 @@ stages and subtasks do not count as additional milestones.
 | 4 | **Type system and semantic analysis** — type representation, scopes, name resolution, type checking, expression/statement semantics, annotations | Sema tests pass | **Complete** (this milestone) |
 | 5 | **Nova64 code generation** — lower validated AST/IR into Nova assembly; frames, calls, control flow, supported data types; codegen tests | Generated assembly assembles and a C program runs under `nova-run` | **Complete** (this milestone) |
 | 6 | **Compiler driver and toolchain integration** — `nova-cc` CLI, preprocessing/parsing/sema/codegen/assembler/linker pipeline, compilation modes, end-to-end tests | End-to-end CLI tests pass | **Complete** (`7d8c168`, `260c964`, `c4d4c77`) |
-| 7 | **Runtime, libnova and end-to-end validation** — compiler runtime support, freestanding libnova, representative programs through compile/assemble/link/emulate, documented coverage, repeatable validation suite | Phase 1 validation suite green | Pending |
+| 7 | **Runtime, libnova and end-to-end validation** — compiler runtime support, freestanding libnova, representative programs through compile/assemble/link/emulate, documented coverage, repeatable validation suite | Phase 1 validation suite green | **Complete** (this milestone) |
 
 **Mandatory phase gate:** do not begin Phase 2 until all seven milestones above
 are complete, tested, documented, and committed, and produce a Phase 1
-completion report. Milestone 6 completion does **not** authorize Phase 2 and does
-not start Milestone 7 automatically without explicit direction.
+completion report. Milestone 6 completion did **not** authorize Phase 2;
+Milestone 7 was completed only under explicit direction. With all seven
+milestones now complete, Phase 2 still requires separate explicit authorization.
 
 ### Milestone 2 implementation notes (preprocessor)
 
@@ -456,14 +463,61 @@ not start Milestone 7 automatically without explicit direction.
   9 object/link, and 5 emulator execution. `tests/test_cli.py` has 28 tests.
   Frontend counts: lexer/preprocessor 107, parser 69, sema 85, codegen 57.
   Full suite 2210 passed; `compileall` clean; conformance 18/18.
-- **Not implemented:** runtime helpers, `libnova`, crt0/start files, hosted C,
-  full variadic argument access, PIC/GOT, automatic relaxation, and any
-  optimizer/register allocator. Those remain Milestone 7 or later.
+- **Not implemented at that milestone:** runtime helpers, `libnova`,
+  crt0/start files, hosted C, full variadic argument access, PIC/GOT, automatic
+  relaxation, and any optimizer/register allocator. Milestone 7 supplied the
+  freestanding runtime, `libnova`, startup, and variadic access; the remaining
+  items are future work.
+
+### Milestone 7 implementation notes (runtime, libnova and validation)
+
+- **Package:** `nova/runtime/` contains `startup.s`, `syscalls.s`, nine headers,
+  and three C sources. Runtime C is compiled through the real compiler and
+  assembler APIs with long calls/branches, cached as immutable templates, and
+  deep-copied per link. `pyproject.toml` installs the runtime as package data.
+- **Startup:** `_start` supplies `sp = 0x80000`, calls `int main(void)` via
+  `LA ra`/`BL`, then `HALT`s with `main`'s return in `a0`. It is freestanding and
+  does not claim hosted startup semantics. See `docs/RUNTIME.md`.
+- **Syscalls:** `nova_write`/`write`, `nova_read`/`read`, `nova_time`,
+  `nova_exit`, and `nova_halt` wrap the existing syscall/ISA contract. The
+  reference model has no kernel vector; validation uses
+  `dispatch_syscall` and resumes at `EPC`.
+- **libnova:** `mem*`, `str*`, integer conversions, termination, `printf`,
+  `putchar`, and `puts` are implemented. `printf` supports exactly
+  `%c %s %d %i %u %x %X %p %%` and emits unsupported modifiers literally.
+- **Variadics:** the parser recognizes `__builtin_va_arg(ap, type)`; codegen
+  implements `va_start`, `va_end`, `va_copy`, and typed `va_arg` against the
+  unchanged 24-byte ABI state. Default promotions include array/function decay.
+- **Hardening:** multi-line block comments and directive continuation were
+  fixed in the preprocessor; odd-sized aggregate ABI chunks, incoming parameter
+  stores, aggregate `va_arg` results, immediate shifts, and switch labels nested
+  in `if` statements were fixed in the backend.
+- **Driver:** `--runtime`, `--nostartfiles`, and `--nostdlib` are link-mode
+  options. Runtime links imply long calls/branches for user sources and add the
+  built-in runtime include path behind user `-I` directories.
+- **Validation:** `scripts/phase1_validate.py` runs 11 ordered stages. Latest
+  result: frontend 180, sema 85, codegen 59, driver 55, runtime 15, library 3,
+  end-to-end 13, example 1, example output exact, conformance 18/18,
+  `compileall` clean, full suite 2245 passed, overall PASS. See
+  `docs/VALIDATION.md` and `docs/PHASE1_COMPLETION.md`.
+- **Intentional non-goals:** hosted C, full ISO C conformance, input streams,
+  allocation, FP/soft-float, PIC/GOT, automatic relaxation, kernel/device
+  integration, and any ISA or ABI change.
 
 ## 7. Known limitations (documented honestly)
 
-- `nova-cc` is implemented for the freestanding C subset, but there is no
-  runtime library, `libnova`, or hosted C environment yet (Milestone 7).
+All Milestone 7 blockers are closed. The following limitations are intentional
+for Phase 1 or reserved for future work; the full four-way classification is in
+`docs/PHASE1_COMPLETION.md`.
+
+**Intentional limitations**
+
+- The runtime is freestanding: fixed initial stack, `main(void)`, `HALT`
+  termination, no hosted process model, environment, loader, or cleanup.
+- The reference emulator has no kernel vector; syscall execution requires the
+  documented host dispatcher. `SYS_READ` has no input source and returns `-1`.
+- `printf` is scoped to `%c %s %d %i %u %x %X %p %%`; unsupported modifiers are
+  literal. There is no `FILE`, input, `snprintf`, or locale support.
 - No floating-point lowering; floating constants are rejected by the lexer and
   FP objects/operations are rejected with source-located diagnostics.
 - Bit-field layout is provisional where `docs/NOVA_C_ABI.md` does not specify a
@@ -471,17 +525,22 @@ not start Milestone 7 automatically without explicit direction.
 - VLAs are rejected explicitly. Flexible-array-member objects and other objects
   without a static size are not lowerable. `sizeof` of an incomplete type is
   diagnosed.
-- No `va_start`/`va_arg` or complete variadic ABI support. Variadic declarations
-  parse, but reading unnamed arguments is not implemented.
 - Some implicit-conversion checks are deliberately conservative; diagnostics
   target the supported subset rather than full ISO C conformance.
 - Not a complete ISO C preprocessor: `#embed`, trigraphs, digraphs, and some
   obscure standard corner cases are intentionally omitted. GNU
   `, ## __VA_ARGS__` remains an extension.
-- No PIC/GOT code generation, optimizer, scheduler, or register allocator.
-  Long calls and long branches are explicit opt-in flags; relaxation is not
-  automatic.
 - K&R old-style function definitions are intentionally unsupported.
+- Default calls/branches remain compact and range-limited outside `--runtime`.
+  There is no automatic relaxation or linker-inserted stub.
+
+**Future enhancements (not Phase 1 blockers)**
+
+- Full hosted libc, formatter conformance, input streams, allocation, and
+  process management.
+- PIC/GOT, dynamic linking, weak symbols, linker scripts, dead-code elimination,
+  and an optimizer/scheduler/register allocator.
+- 128-bit helpers, soft-float, kernel/device integration, and hardware RTL.
 
 ## 8. Definition of done (all seven milestones)
 
@@ -493,5 +552,8 @@ not start Milestone 7 automatically without explicit direction.
 - Every diagnostic is source-located and deterministic.
 - Existing assembler, linker, emulator, object-format, and conformance tests
   continue to pass unchanged.
-- A Phase 1 completion report is produced and Phase 2 is started only after
-  explicit authorization.
+- Freestanding startup, syscall wrappers, headers, variadics, formatted output,
+  and `--runtime` linking have end-to-end tests and exact-output validation.
+- A repeatable validation script reports every stage green and a Phase 1
+  completion report is produced.
+- Phase 1 is 7/7 (100%); Phase 2 starts only after explicit authorization.

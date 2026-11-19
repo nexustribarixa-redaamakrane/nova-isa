@@ -1,9 +1,11 @@
 # Nova compiler runtime requirements
 
-**Status:** specification of the helper contracts a Nova C compiler may call.
-Phase 0 defines these names and signatures; it does **not** implement a compiler
-runtime. A freestanding `libnova` in Phase 1 will provide the subset the C
-subset compiler needs.
+**Status:** specification of optional helper contracts plus the implemented
+Phase 1 boundary. Phase 0 defined these names and signatures. Phase 1 Milestone 7
+adds a freestanding `libnova` (see `docs/RUNTIME.md`), but the current compiler
+does **not** emit any `__nova_*` helper call: division and remainder use native
+ISA instructions, so no helper body is required. The contracts below remain
+reserved for future compiler modes or wider integer support.
 
 The base ISA already implements 64-bit add, subtract, multiply, signed and
 unsigned divide/remainder, shifts, rotates, atomics and `FENCE`. Helpers are
@@ -29,7 +31,9 @@ collisions with libc and libgcc names.
 The ISA's `DIV`/`UDIV`/`REM`/`UREM` trap on a zero divisor. A compiler targeting
 C semantics (where division by zero is undefined but must not take a machine
 trap in every build mode) may either emit the instructions directly with a
-guarantee from the program, or call these helpers. Division overflow of the
+guarantee from the program, or call these helpers. The Phase 1 compiler takes the
+first path and emits the native instructions; no helper object defines these
+names. Division overflow of the
 signed minimum by `-1` is defined by the ISA to wrap; the helpers preserve that
 behavior unless the language front end requests a trap.
 
@@ -93,14 +97,22 @@ work belongs to a future ISA extension plus a new ABI version.
 ## 7. What libc provides, not the compiler runtime
 
 `memcpy`, `memmove`, `memset`, `memcmp`, `strlen` and similar routines are libc
-responsibilities. A freestanding runtime may provide a minimal subset, but the
-compiler must not assume their presence unless the target libc is linked.
+responsibilities. The Phase 1 `libnova` now provides a freestanding subset of
+them, along with integer conversions, scoped `printf`, and syscall wrappers; see
+`docs/RUNTIME.md`. The compiler still must not assume their presence unless the
+runtime is linked with `nova-cc --runtime`.
 
-## 8. Phase 0 status
+## 8. Implementation status
 
-- Defined here: names, signatures, calling convention and rationale.
-- Not implemented here: any helper body, no `libgcc`-style library, no soft
-  float, no startup files.
-- Phase 1 gate: the C-subset compiler emits calls only to helpers that
-  `libnova` actually provides, or emits native instructions when the helper is
-  unnecessary.
+- **Specified here:** optional helper names, signatures, calling convention,
+  and rationale.
+- **Implemented in `nova/runtime/`:** startup, syscall wrappers, headers, and
+  the freestanding `libnova` subset documented in `docs/RUNTIME.md`.
+- **Not implemented:** any `__nova_*` helper body, 128-bit arithmetic, soft
+  float, or GCC/LLVM-class runtime support. These are intentional limitations,
+  not Phase 1 blockers.
+- **Phase 1 gate satisfied:** the compiler emits no external helper symbols for
+  supported arithmetic; when a library routine is called, `--runtime` supplies
+  the implementation or the linker reports a normal undefined symbol.
+- **Future work:** provide the reserved helpers only when a compiler mode or
+  language extension actually references them.
