@@ -18,7 +18,7 @@ finished. No future milestone is marked complete early.
 
 | # | Milestone | Status | Gate |
 | --- | --- | --- | --- |
-| 1 | NPK architecture and boot foundation | NOT STARTED | Bootable deterministic `.nob` kernel image on `NovaMachine` |
+| 1 | NPK architecture and boot foundation | COMPLETE | Bootable deterministic `.nob` kernel image that processes and receipt-verifies boot work on `NovaMachine` |
 | 2 | Exception and trap subsystem | NOT STARTED | Register-preserving trap frame and `MRET` return test |
 | 3 | Physical and virtual memory management | NOT STARTED | Allocation, mapping, permissions, faults, and address-space isolation tested |
 | 4 | Syscall and privilege subsystem | NOT STARTED | In-kernel ABI dispatch with validation and error conversion tested |
@@ -29,9 +29,12 @@ finished. No future milestone is marked complete early.
 
 ## Milestone 1 — NPK architecture and boot foundation
 
+**Status:** COMPLETE.
+
 **Objective.** Establish the authoritative architecture, boot contract, kernel
 layout, build workflow, and a minimal bootable NPK image using the existing
-Nova toolchain.
+Nova toolchain. The image must demonstrably process work through the NPK
+pipeline rather than merely boot a conventional call chain.
 
 **Dependencies.**
 
@@ -44,18 +47,25 @@ Nova toolchain.
 - `docs/NPK_ARCHITECTURE.md`, `docs/PHASE2_PLAN.md`,
   `docs/NPK_INITIATION_REPORT.md`, `docs/PORTING_READINESS.md`, `README.md`.
 - `nova/npk/` package: layout constants, image validation, boot helper, build
-  helper, minimal kernel sources.
+  helper, processing receipt decoder, and minimal kernel sources including the
+  boot pipeline.
 - `tests/test_npk.py`.
 - `scripts/npk_validate.py`.
 - `pyproject.toml` package data.
 
 **Implementation scope.**
 
-- Define `NPK` identity, Nova64-only CPU policy, boot contract, and layout.
+- Define `NPK` identity, Nova64-only CPU policy, boot contract, layout, and the
+  processed-kernel architecture explicitly.
 - Build a `.nob` kernel with global entry `_npk_start` at `image_base = 0x1000`.
 - Kernel entry sets `sp`, installs `vbar` from a link-computed symbol, writes a
   boot marker, calls `npk_main`, and halts with its return code in `a0`.
-- Provide deterministic host-side build and boot helpers.
+- Implement one real processing operation, `NPK_OP_BOOT_VERIFY`, with a single
+  processing unit and the five documented pipeline stages.
+- Publish a fixed processing receipt that records the operation, input, output,
+  status, final stage, and complete stage trace.
+- Gate the kernel return code on successful processing completion.
+- Provide deterministic host-side build, boot, and receipt-decoding helpers.
 - Reject invalid kernel images and unexpected boot exceptions in tests.
 
 **Tests.**
@@ -65,6 +75,9 @@ Nova toolchain.
 - Deterministic rebuild produces byte-identical `.nob`.
 - Boot reaches `HALT`, `a0 == 0`, marker matches, `vbar` lies in the image, and
   `sp` is the boot stack top.
+- The processing receipt has the expected magic, operation code, input, output,
+  terminal status, final stage, and exact stage trace.
+- The kernel returns zero only after the boot operation reaches `COMPLETE`.
 - A corrupted/undefined instruction image is rejected without a false pass.
 - Phase 1 regression remains green.
 
@@ -74,15 +87,34 @@ Nova toolchain.
 - `python scripts/phase1_validate.py` remains green with unchanged counts.
 - The minimal kernel builds from source through `nova-as`, `nova-cc`, and
   `nova-ld` with no new executable format.
+- The boot path is observably a processed kernel: work enters a typed pipeline,
+  advances through every stage, commits a result, and emits a receipt.
 - Documentation states that bare mode gives no user/kernel memory isolation.
 
 **Known limitations.**
 
 - Machine privilege is supplied by the host harness; there is no firmware.
-- No allocator, trap frame, syscall dispatcher, devices, scheduler, user
-  process, or preemptive behavior.
-- Boot uses the host-side sparse memory model and a private reference-memory
-  read for the marker assertion; this is a test helper, not a kernel API.
+- Processing is limited to one boot verification operation on one fixed unit;
+  there is no general operation queue, trap/syscall producer, device producer,
+  allocator, trap frame, syscall dispatcher, scheduler, user process, or
+  preemptive behavior.
+- Boot uses the host-side sparse memory model and private reference-memory
+  reads for the marker and receipt assertions; these are test helpers, not
+  kernel APIs.
+
+**Validation result.**
+
+- `python -m pytest -q tests/test_npk.py`: **9 passed**.
+- `python scripts/npk_validate.py`: **PASS**.
+- Phase 1 counts unchanged: frontend 180, sema 85, codegen 59, driver 55,
+  runtime 15, library 1, end-to-end 13, emulator 1831, example 1, conformance
+  18/18, compileall passed.
+- Full suite after adding NPK tests: **2254 passed** (Phase 1 baseline 2245 plus
+  9 NPK tests).
+- `python -m pytest -q tests/test_documentation.py`: **17 passed**.
+- Observed processing receipt: magic `0x4E504B50`, operation `1`, input
+  `0x4E504B31`, output `0x4E504B32`, status `1`, final stage `5`, trace
+  `(1, 2, 3, 4, 5)`.
 
 **Completion conditions.** Architecture and roadmap committed, minimal kernel
 source and helpers committed, tests and validation script green, documentation

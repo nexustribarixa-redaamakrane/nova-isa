@@ -23,6 +23,8 @@ nova = [
     "runtime/include/*.h",
     "runtime/src/*.c",
     "runtime/*.s",
+    "npk/src/*.c",
+    "npk/src/*.s",
 ]
 
 [tool.pytest.ini_options]

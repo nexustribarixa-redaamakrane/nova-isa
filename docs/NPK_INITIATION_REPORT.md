@@ -182,10 +182,16 @@ its status; `SYS_YIELD` is terminal rather than a scheduler call.
 
 ## 8. NPK architectural overview
 
-NPK is a modular, machine-mode-first kernel for Nova OS:
+NPK is a modular, machine-mode-first kernel for Nova OS. The repository has no
+pre-existing definition of "processed kernel", so Phase 2 introduces one
+explicitly in `docs/NPK_ARCHITECTURE.md`: kernel work is transformed through an
+admit/validate/execute/commit/complete pipeline by a processing unit and proved
+by a receipt. This is a new Phase 2 design decision, not a canon recovered from
+Phase 1.
 
-- **Core/Boot/Architecture:** image validation, boot contract, CSR and vector
-  setup, deterministic initialization.
+- **Core/Boot/Architecture/Processing:** image validation, boot contract, CSR
+  and vector setup, operation records, pipeline stages, processing units,
+  receipts, and deterministic initialization.
 - **Exceptions:** software trap frame, dispatch, `MRET` return.
 - **Memory:** frame allocation, page tables, address spaces, faults, TLB.
 - **Syscalls:** ABI-compatible dispatcher with validation.
@@ -224,6 +230,7 @@ Milestone 1 uses bare mode:
 | Exception vector | link-computed inside image | `vbar` target |
 | Boot stack | top `0x80000`, grows down | Initial kernel stack |
 | Boot marker | `0x90000` | 8-byte `0x4E504B31` handshake |
+| Processing receipt | `0x90008`, 96 bytes | Operation stage trace and terminal result |
 
 Future policy reserves low canonical addresses for kernel mappings and high
 canonical addresses for user spaces, with U-bit enforcement and no user access

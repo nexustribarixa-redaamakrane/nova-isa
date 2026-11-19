@@ -14,6 +14,194 @@ This document describes the architecture that Phase 2 implements incrementally.
 A component described here is not assumed to exist until its milestone is marked
 COMPLETE in `docs/PHASE2_PLAN.md`.
 
+## The Processed Kernel Architecture
+
+### Status of this definition
+
+The existing repository documentation uses the name "Nova Processed Kernel"
+but does not previously define what "Processed" means. It is not a canonical
+term inherited from Nova ISA v1.0, the Phase 1 ABI, OpenWindows, or an older
+kernel design. The following model is therefore a concrete **Phase 2 NPK design
+decision**, introduced here rather than presented as an already-established
+fact. It becomes authoritative for Phase 2 from this architecture baseline and
+must be implemented, tested, and revised openly if later evidence requires it.
+
+### Definition of "Processed"
+
+In NPK, *processing* is the deterministic transformation of an explicit kernel
+operation record through a defined pipeline of stages before its result is
+committed. The name is not decorative: an operation is not handled by calling a
+conventional kernel function directly. It is admitted, validated, executed,
+committed, and receipted by a processing unit.
+
+The kernel work processed by NPK includes boot verification, exception and
+interrupt events, system-call requests, memory-management operations, device
+events, task transitions, and executable-loading requests. In Milestone 1 the
+only implemented operation is boot verification; the other listed classes are
+architecture targets, not implemented features.
+
+An operation is *processed* only when:
+
+1. it has a typed operation code, input, stage cursor, output, and status;
+2. a processing unit advances it through the ordered stage pipeline;
+3. each stage observes the invariants required by the previous stage;
+4. the result is committed at an explicit commit point; and
+5. a receipt records the performed stage sequence and terminal status.
+
+Simple calls, threads, or ready queues are not relabeled as processing. A
+function call is an implementation mechanism; an NPK processing operation is
+the architectural unit of work whose progress and outcome are observable.
+
+### Processing model
+
+The pipeline is:
+
+```text
+producer -> ADMIT -> VALIDATE -> EXECUTE -> COMMIT -> COMPLETE -> receipt
+                 \        \          \
+                  \        \          +-> FAILED
+                   \        +------------> REJECTED
+                    +---------------------> REJECTED
+```
+
+- **Producer.** Boot code, a trap vector, a syscall adapter, a device interrupt
+  adapter, or the executable loader creates an operation record. Producers
+  classify and submit work; they do not implement kernel policy.
+- **ADMIT.** The operation receives a legal code and input, is bound to a
+  processing unit, and enters the pipeline. Admission has no kernel state
+  side effects.
+- **VALIDATE.** Operation type, argument shape, address ranges, capability
+  requirements, privilege, and stage ordering are checked. An invalid operation
+  becomes `REJECTED` with a reason and never reaches `EXECUTE`.
+- **EXECUTE.** The validated operation performs its transformation and computes
+  an output. For operations with memory or device effects, all required memory
+  and device capabilities must already have been validated.
+- **COMMIT.** The output and status become visible at a single defined commit
+  point. This allows validation and rejection to be distinguished from a
+  completed operation.
+- **COMPLETE.** The processing unit emits a receipt and becomes available. The
+  receipt is evidence for tests and debugging, not a user-visible ABI.
+- **REJECTED / FAILED.** `REJECTED` means the operation never satisfied its
+  entry invariants. `FAILED` means it passed validation but could not complete;
+  failures are never silently converted to success.
+
+A processing unit is the logical owner of one operation while it traverses the
+pipeline. Milestone 1 has exactly one fixed unit, `PU0`, and no concurrency.
+Later milestones may bind units to tasks or harts, but that is not implemented
+or claimed here.
+
+### Components responsible for processing
+
+| Component | Responsibility | Milestone 1 status |
+| --- | --- | --- |
+| Operation producers | Create typed work from boot/trap/syscall/device/loader events | Boot producer only |
+| `NpkOperation` | Carries operation code, input, output, status, and stage cursor | Implemented in C |
+| Processing unit `PU0` | Owns the active operation and drives stage advancement | Implemented in C |
+| Stage functions | Implement the five stage invariants separately | Implemented for boot verification |
+| Receipt memory | Publishes stage trace and terminal result for host observation | Implemented at `0x90008` |
+| Processing coordinator | Submits work and checks the terminal result | Implemented in `npk_main` |
+| Scheduler | Chooses which unit/operation receives CPU time | Not implemented |
+
+Milestone 1 source layout separates the kernel entry from this mechanism:
+`nova/npk/src/start.s` establishes the machine context, `nova/npk/src/processing.c`
+implements the operation pipeline and receipt, and `nova/npk/src/kernel.c`
+submits and checks the boot verification operation.
+
+### Relationship between processing and scheduling
+
+Processing and scheduling are different mechanisms:
+
+- scheduling decides **which** ready work occupies a CPU;
+- processing defines **how** an operation becomes a committed state change;
+- a task may be blocked or resumed at a processing-stage boundary, but its
+  stage progress is part of the operation record, not an implicit call stack;
+- a scheduler must not skip a stage or promote an unvalidated operation.
+
+Milestone 1 has a fixed boot operation and therefore no scheduler. Cooperative
+and later preemptive scheduling in Milestones 6 and 8 will select operations for
+processing units; they will not replace the pipeline.
+
+### Interaction with other subsystems
+
+| Subsystem | Interaction with processing |
+| --- | --- |
+| Exceptions | A trap vector classifies the event and admits an exception operation; software frame restoration happens after the operation commits or fails. |
+| Memory | `VALIDATE` declares address/range/permission requirements; `EXECUTE` performs mapped operations; a fault re-enters processing as a fault event. |
+| Syscalls | The trap adapter converts the frozen ABI call into a syscall operation; validation checks number, arguments, and user pointers; commit writes the `a0`/`a1` result. |
+| Devices | Interrupt adapters admit device-event operations; no driver bypasses validation or commits directly from an interrupt handler. |
+| Tasks | Task creation, yield, block, resume, and exit are processing operations; the TCB holds the processing state that survives a stage boundary. |
+| Executable loader | Header validation, allocation, mapping, entry setup, and activation are stages of a load operation, not uncontrolled side effects in a syscall. |
+| Debugging | Receipts and boot markers provide deterministic, host-visible evidence of which stages ran and what terminal status was reached. |
+
+### Guarantees
+
+The processed architecture provides these guarantees as its subsystems are
+implemented and tested:
+
+- explicit provenance for every kernel action;
+- ordered stage progression with no validation bypass;
+- deterministic operation and receipt format;
+- observable completion, rejection, or failure;
+- an explicit commit point separating checked work from visible state changes;
+- scheduler independence from processing correctness;
+- a stable extension point for future trap, syscall, device, task, and loader
+  operations without changing the Phase 1 ABI or ISA.
+
+Milestone 1 guarantees only these properties for boot verification. It does not
+guarantee transactional rollback, isolation, preemption, multiprocessing, or
+general syscall/device processing.
+
+### Difference from a conventional kernel
+
+An ordinary conventional kernel can route a request directly to a subsystem
+function, perform side effects inside that function, and treat the call stack as
+the implicit record of progress. NPK instead makes the request itself an
+architectural object:
+
+- the operation record, not the call stack, defines progress;
+- stage functions are small, ordered, and side-effect disciplined rather than
+  being a collection of interchangeable service routines;
+- a processing unit owns an operation across stage boundaries, so an operation
+  can later be suspended and resumed without losing its processing state;
+- `REJECTED` and `FAILED` are distinct from an unhandled call error;
+- commit and completion are observable events with a receipt;
+- the scheduler selects work for a unit but cannot redefine pipeline semantics.
+
+This makes NPK a processed kernel by architecture and behavior. The distinction
+does not come from naming existing threads or queues "processing". Milestone 1
+demonstrates it with one operation; the distinction becomes more significant as
+traps, syscalls, devices, tasks, and loading are admitted to the same pipeline
+in later milestones.
+
+### Testing the processed architecture
+
+Processing is testable without inspecting undocumented host state:
+
+1. build the kernel from the real assembler, compiler, linker, and `.nob` path;
+2. boot it on `NovaMachine`;
+3. read the fixed receipt memory and assert the magic, operation code, input,
+   terminal status, final stage, output, and full stage trace;
+4. assert that the kernel's return status is zero only when the receipt is
+   complete;
+5. add negative tests at each later milestone for rejected operations, failed
+   execution, interrupted stage boundaries, and scheduler interactions.
+
+The Milestone 1 receipt is defined as follows:
+
+| Address / offset | Size | Field |
+| --- | ---: | --- |
+| `0x90000` | 8 | Existing boot marker |
+| `0x90008 + 0` | 8 | Processing magic `0x4E504B50` (`NPKP`) |
+| `0x90008 + 8` | 8 | Operation code, `1` for boot verification |
+| `0x90008 + 16` | 8 | Current/final stage code |
+| `0x90008 + 24` | 8 | Status: `0` pending, `1` processed, `2` rejected, `3` failed |
+| `0x90008 + 32` | 8 | Input, equal to the boot marker value |
+| `0x90008 + 40` | 8 | Output, `0x4E504B32` for a verified boot |
+| `0x90008 + 48` | 40 | Five 8-byte stage-trace words, expected `1,2,3,4,5` |
+
+The receipt is a kernel-to-harness observability structure, not a new syscall,
+ISA facility, or executable format.
+
 ## 1. Purpose and scope
 
 NPK provides the kernel foundation for Nova OS:
@@ -90,6 +278,7 @@ The logical NPK subsystems are:
 NPK
 ├── Core            constants, image validation, boot result, panic policy
 ├── Boot            entry assembly, initialization order, stack setup
+├── Processing      operation records, stages, processing units, receipts
 ├── Architecture    privilege/CSR/vector contracts and ISA-facing helpers
 ├── Exceptions      trap vectors, software trap frame, fault dispatch, MRET
 ├── Memory          physical frames, page tables, address spaces, TLB policy
@@ -101,7 +290,7 @@ NPK
 └── Debugging        boot markers, trace/log integration, panic diagnostics
 ```
 
-Milestone 1 creates only the Core, Boot, Architecture, and Debugging
+Milestone 1 creates the Core, Boot, Processing, Architecture, and Debugging
 foundations needed for a reproducible boot image. Empty directories for the
 other subsystems are deliberately not created.
 
@@ -143,7 +332,7 @@ any C function.
 1. sets `sp` to `NPK_BOOT_STACK_TOP`;
 2. installs the exception vector address from a link-time symbol;
 3. writes the boot marker;
-4. calls `npk_main`;
+4. calls `npk_main`, which submits and checks the boot verification operation;
 5. executes `HALT` with `npk_main`'s return value in `a0`.
 
 `HALT` is the Phase 2 termination mechanism. `SYS_EXIT` remains an ABI syscall
