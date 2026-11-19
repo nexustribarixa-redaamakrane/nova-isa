@@ -15,5 +15,15 @@ nova-ld = "nova.cli:link_main"
 nova-objdump = "nova.cli:objdump_main"
 nova-run = "nova.cli:run_main"
 
+[tool.setuptools.packages.find]
+include = ["nova*"]
+
+[tool.setuptools.package-data]
+nova = [
+    "runtime/include/*.h",
+    "runtime/src/*.c",
+    "runtime/*.s",
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
