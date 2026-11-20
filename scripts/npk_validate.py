@@ -4,9 +4,9 @@ Run from the repository root::
 
     python scripts/npk_validate.py
 
-The script runs the NPK boot/build, processing-core, and exception/trap tests
-first, then the unchanged Phase 1 regression suite. It exits 0 only when both
-stages pass.
+The script runs the NPK boot/build, processing-core, exception/trap, and memory
+tests first, then the unchanged Phase 1 regression suite. It exits 0 only when
+both stages pass.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ STAGES = [
             "tests/test_npk.py",
             "tests/test_npk_core.py",
             "tests/test_npk_exceptions.py",
+            "tests/test_npk_memory.py",
         ],
     ),
     ("phase1", [sys.executable, "scripts/phase1_validate.py"]),
