@@ -58,7 +58,7 @@ are preserved as the foundation for NPK.
 | External interrupt source | Requires emulator enhancement for devices; host injection works | `set_interrupt_pending(INT_EXTERNAL)` only |
 | Wake-from-halted on interrupt | Not implemented | `halted` is never cleared by interrupt injection |
 | Sparse physical memory and 64-bit access checks | Implemented and tested | `emulator.py:845`, `:1035-1068` |
-| RAM-size limit / frame allocator / public map API | Not implemented; Requires emulator enhancement | No RAM bound, free list, or `map_page()` exists |
+| RAM-size limit / frame allocator / public map API | Platform: not implemented; NPK M4: software allocator and mapper implemented | Emulator still has no RAM bound, free list, or `map_page()`; `memory.c` declares an arena and builds page tables itself |
 | Four-level paged translation via `ptbr` | Implemented and tested | `emulator.py:1107-1282`, `tests/test_v1_features.py` |
 | 4 KiB / 2 MiB / 1 GiB pages and R/W/X/U/A/D PTE bits | Implemented and tested | Paging tests and conformance vectors |
 | ASID / tagged TLB / shootdown | Not implemented; Requires emulator enhancement | TLB key includes `ptbr`; every `ptbr` write flushes all |
@@ -88,8 +88,11 @@ not unimplemented stubs to be advertised:
 - **Software trap frame.** GPRs, `sp`, `psr`, and `tval` are not saved by entry.
   This remains `Not implemented` in the platform by design; Milestone 3 adds the
   NPK software frame in Nova assembly, not a platform facility.
-- **Memory.** No RAM-size model, frame allocator, mapping helper, MMIO regions,
-  ASID, TLB shootdown, or enforced global PTE bit. `Requires emulator enhancement`.
+- **Memory.** The platform still has no RAM-size model, mapping helper, MMIO
+  regions, ASID, TLB shootdown, or enforced global PTE bit. Milestone 4 adds an
+  NPK software allocator and map/unmap policy over sparse memory; it does not
+  add a platform facility or physical hardware claim. `Requires emulator enhancement`
+  only for true RAM discovery, MMIO, ASID, or shootdown.
 - **Devices.** Only syscall-based write logging and CSR timer interrupts exist.
   No input source, block device, interrupt controller, or framebuffer.
   `Requires emulator enhancement` / `Requires future physical hardware`.
@@ -156,7 +159,12 @@ The reference translator is usable and should be reused:
 - Address-space switching is by `ptbr` write only; no ASID exists.
 
 NPK must add the page-table construction and policy layer; it must not rewrite
-the emulator translator.
+the emulator translator. Milestone 4 now provides that layer in
+`nova/npk/src/memory.c`: it declares a 4 KiB allocator arena, builds four-level
+page tables with the real Nova PTE format, owns two software page-table roots,
+installs 4 KiB leaf mappings, checks R/W/X/U permissions, and invalidates with
+`TLBI r0`. Fault classification and translation remain platform behavior; NPK
+only supplies the tables and policy that the platform enforces.
 
 ## 7. Existing syscall implementation
 
@@ -194,7 +202,8 @@ Phase 1.
   and vector setup, operation records, pipeline stages, processing units,
   receipts, and deterministic initialization.
 - **Exceptions:** Milestone 3 software trap frame, typed dispatch, `MRET` return.
-- **Memory:** frame allocation, page tables, address spaces, faults, TLB.
+- **Memory:** Milestone 4 software allocation, page tables, two owner-scoped
+  address spaces, and `TLBI`; faults are classified by the existing platform.
 - **Syscalls:** ABI-compatible dispatcher with validation.
 - **Devices:** console and timer over real platform facilities only.
 - **Scheduler:** cooperative tasks first; preemption only after timer proof.
@@ -233,6 +242,10 @@ Milestone 1 uses bare mode:
 | Boot marker | `0x90000` | 8-byte `0x4E504B31` handshake |
 | Processing receipt | `0x90008`, 96 bytes | Operation stage trace and terminal result |
 | Trap frame / state / receipts | `0x90900` / `0x90A40` / `0x90B00` | Milestone 3 304-byte frame, dispatch state, and eight receipts |
+| Memory entry / state / regions | `0x90F00` / `0x90F10` / `0x90F90` | Milestone 4 entry word, state block, and 64 region descriptors |
+| Address spaces / request / response | `0x91F90` / `0x91FD0` / `0x92010` | Two software roots and typed request/response blocks |
+| Memory receipt log | `0x92050` | 128 independent 128-byte memory receipts |
+| Declared physical arena | `0xC0000`, `0x40000` bytes | NPK policy arena over sparse reference memory |
 
 Future policy reserves low canonical addresses for kernel mappings and high
 canonical addresses for user spaces, with U-bit enforcement and no user access
@@ -298,8 +311,8 @@ The authorized roadmap has ten milestones; the corrected current map is:
 | 1 | NPK architecture and boot foundation | COMPLETE | Deterministic bootable `.nob` kernel on `NovaMachine` |
 | 2 | Reusable processing core and operation management | COMPLETE | Typed operations, lifecycle, unit ownership, receipts |
 | 3 | Exception and trap subsystem | COMPLETE | Register-preserving trap frame and `MRET` return |
-| 4 | Physical and virtual memory management | NOT STARTED | Allocation, mapping, permissions, faults, isolation |
-| 5 | Object Manager and Universal Object Model | PLANNED | Resource identity, handles, lifetime after memory foundations |
+| 4 | Physical and virtual memory management | COMPLETE | Software allocation, mapping, permissions, faults, isolation |
+| 5 | Object Manager and Universal Object Model | PLANNED ONLY | Resource identity, handles, lifetime after memory foundations |
 | 6 | Syscall and privilege subsystem | NOT STARTED | In-kernel ABI dispatch with validation |
 | 7 | Device abstraction and timer integration | NOT STARTED | Real console/timer interfaces only |
 | 8 | Task management and cooperative scheduling | NOT STARTED | Task states, yield, deterministic switching |

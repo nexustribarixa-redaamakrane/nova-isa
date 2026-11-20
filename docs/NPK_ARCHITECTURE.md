@@ -1,7 +1,9 @@
 # NPK — Nova Processed Kernel architecture
 
 **Status:** authoritative Phase 2 architecture baseline; Milestone 2 processing
-core and Milestone 3 exception/trap subsystem implemented.  
+core, Milestone 3 exception/trap subsystem, and Milestone 4 memory subsystem
+implemented.
+
 **Kernel:** NPK — Nova Processed Kernel.  
 **Classification:** Winoid.  
 **Phase:** Phase 2, NPK only. Phase 3 and OpenWindows work are out of scope.
@@ -37,9 +39,10 @@ committed, and receipted by a processing unit.
 
 The kernel work processed by NPK includes boot verification, exception and
 interrupt events, system-call requests, memory-management operations, device
-events, task transitions, and executable-loading requests. In Milestone 1 the
-only implemented operation is boot verification; the other listed classes are
-architecture targets, not implemented features.
+events, task transitions, and executable-loading requests. Boot verification,
+trap processing, and the five memory operations are implemented; system-call,
+device, task, and loader work remain architecture targets rather than
+implemented features.
 
 An operation is *processed* only when:
 
@@ -95,22 +98,26 @@ or claimed here.
 
 | Component | Responsibility | Status |
 | --- | --- | --- |
-| Operation producers | Create typed work from boot/trap/syscall/device/loader events | Boot and trap producers implemented; syscall/device/loader producers remain future work |
-| `NpkOperation` | Carries operation code, input, stage cursor, provisional result, result, reason, and receipt index | Generalized typed records in Milestone 2; trap type added in Milestone 3 |
-| Processing units `PU0`/`PU1` | Own one operation each and drive stage advancement | Two sequential units in Milestone 2 |
-| Stage handlers | Implement validate/execute/commit invariants per operation type | Boot, diagnostic, and trap types implemented |
-| Admission interface | Validates id/type, rejects duplicates, assigns a free unit, and emits a receipt | Implemented in Milestone 2; trap operations use the same interface |
-| Receipt memory | Publishes stage trace and terminal result for host observation | Fixed boot receipt at `0x90008`; core log at `0x90220`; trap log at `0x90B00` |
-| Core/operation snapshots | Expose counters, unit state, and operation slots to host tests | Implemented in Milestone 2; trap state at `0x90A40` in Milestone 3 |
-| Processing coordinator | Submits work and checks the terminal result | `npk_main` plus the Milestone 2 self-test; trap dispatch in `trap.c` |
+| Operation producers | Create typed work from boot/trap/memory/syscall/device/loader events | Boot, trap, and post-boot memory producers implemented; syscall/device/loader producers remain future work |
+| `NpkOperation` | Carries operation code, input, stage cursor, provisional result, result, reason, and receipt index | Generalized typed records in Milestone 2; trap type added in Milestone 3; memory address/size/flags/aux/evidence fields added in Milestone 4 |
+| Processing units `PU0`/`PU1` | Own one operation each and drive stage advancement | Two sequential units in Milestone 2; memory operations use the same ownership model |
+| Stage handlers | Implement validate/execute/commit invariants per operation type | Boot, diagnostic, trap, and five memory operation types implemented |
+| Admission interface | Validates id/type, rejects duplicates, assigns a free unit, and emits a receipt | Implemented in Milestone 2; trap and memory operations use the same interface |
+| Receipt memory | Publishes stage trace and terminal result for host observation | Fixed boot receipt at `0x90008`; core log at `0x90220`; trap log at `0x90B00`; memory log at `0x92050` |
+| Core/operation snapshots | Expose counters, unit state, and operation slots to host tests | Implemented in Milestone 2; trap state at `0x90A40` in Milestone 3; memory state at `0x90F10` in Milestone 4 |
+| Processing coordinator | Submits work and checks the terminal result | `npk_main` and the Milestone 2 self-test; trap dispatch in `trap.c`; memory request wrapper in `memory.c` |
 | Scheduler | Chooses which unit/operation receives CPU time | Not implemented |
 
-Milestone 3 source layout separates the kernel entry from this mechanism:
+Milestone 3 separated the kernel entry from this mechanism:
 `nova/npk/src/start.s` establishes the machine context, `nova/npk/src/trap.s`
 is the Nova assembly trap entry and frame preserver, `nova/npk/src/trap.c`
-classifies traps and submits typed operations, `nova/npk/src/processing.c`
-implements the operation pipeline and receipts, and `nova/npk/src/kernel.c`
-submits and checks the boot verification operation.
+classifies traps and submits typed operations, and `nova/npk/src/processing.c`
+implements the operation pipeline and receipts. Milestone 4 adds
+`nova/npk/src/memory.c` for the software allocator, page-table construction,
+typed memory handlers, and published request wrapper, plus
+`nova/npk/src/memory.s` for the real `TLBI r0` full-flush helper.
+`nova/npk/src/kernel.c` is only a coordinator that initializes boot, trap, and
+memory subsystems in order.
 
 ### Relationship between processing and scheduling
 
@@ -374,16 +381,66 @@ dispatch count of zero. Its `last_op_slot` and `receipt_index` fields use
 `NO_INDEX` before a dispatch. Host decoders in `nova/npk/traps.py` read these
 fixed regions through `NovaMachine`; they are test helpers, not guest APIs.
 
-**Planned Object Manager (Milestone 5, NOT IMPLEMENTED).** The Winoid principle
+### Milestone 4 memory subsystem
+
+Milestone 4 adds an NPK-managed memory subsystem over `NovaMachine`'s existing
+sparse memory and real translator. The emulator has no RAM-size model, frame
+allocator, or `map_page()` API, so NPK **declares** a finite physical arena and
+implements ownership and mapping policy itself. This is a software kernel
+subsystem in the reference machine, not a physical-hardware claim.
+
+Five typed operations are admitted through the ordinary core:
+
+| Type | Operation | Committed effect |
+| ---: | --- | --- |
+| `4` | `NPK_OP_MEMORY_ALLOCATE` | Reserves aligned physical pages and writes an allocation tag |
+| `5` | `NPK_OP_MEMORY_RELEASE` | Frees an owned region only when it has no live mappings |
+| `6` | `NPK_OP_MEMORY_MAP` | Allocates page-table pages and installs a 4 KiB leaf PTE |
+| `7` | `NPK_OP_MEMORY_UNMAP` | Clears a leaf PTE and decrements the region's mapping count |
+| `8` | `NPK_OP_MEMORY_QUERY` | Reports a region's base without mutating it |
+
+The request entry is published at `0x90F00`; the fixed state, region, address
+space, request/response, and receipt regions are:
+
+| Region | Address | Size | Purpose |
+| --- | --- | --- | --- |
+| Memory entry | `0x90F00` | 8 bytes | Published address of `npk_memory_request` |
+| Memory state | `0x90F10` | 128 bytes | Magic/version, arena, counters, epochs, next id, last status/reason |
+| Region table | `0x90F90` | 64 × 64 bytes | Region state, id, base, size, owner, type, flags, live-map count |
+| Address spaces | `0x91F90` | 2 × 32 bytes | State, owner, root PPN, mapping count |
+| Memory request | `0x91FD0` | 64 bytes | Caller-published typed request |
+| Memory response | `0x92010` | 64 bytes | Status, reason, result, receipt index, slot |
+| Memory receipt log | `0x92050` | 128 × 128 bytes | Independent receipts for all memory operations |
+| Physical arena | `0xC0000` | `0x40000` bytes | NPK-declared 4 KiB allocation arena |
+
+`VALIDATE` checks the request magic, id, owner, argument shape, alignment,
+canonical addresses, region identity/ownership/state, and permission encoding;
+it performs no state mutation. `EXECUTE` computes a provisional base or PTE
+address and checks arena fit or existing page-table structure. `COMMIT` writes
+the region descriptor, tag, PTEs, counters, and TLB invalidation epoch. A
+validation failure is `REJECTED`; exhaustion or a PTE conflict discovered after
+validation is `FAILED`. The receipt jointly records the size and evidence word
+so host tests can correlate it with real state.
+
+Only 4 KiB leaf mappings are installed by this milestone. The translator still
+supports 2 MiB and 1 GiB leaves, but NPK does not yet construct them. Full
+`TLBI r0` is used after map/unmap; there is no ASID, shootdown, global-bit
+policy, MMIO region, RAM discovery, executable loader, or user process. The
+commit point is not transactional: there is no rollback, journal, isolation, or
+durability guarantee, and a commit-time failure may leave earlier page-table
+allocations visible. Boot work never admits a memory operation and leaves the
+Milestone 1–3 receipts and counters unchanged.
+
+**Planned Object Manager (Milestone 5, PLANNED ONLY).** The Winoid principle
 "everything is an object" is interpreted as a consistent contract for
 kernel-managed resources, not as one allocation per variable, register,
-instruction, or byte. After memory management provides allocation and
-address-space foundations, a planned Object Manager will investigate object
-identity, types, headers, handles, permissions, lifetime, sharing, naming,
-ownership, and cleanup. Syscalls can then expose stable object operations, which
-must enter the NPK processing pipeline rather than bypass it. The existing
-syscall numbers `SYS_OBJ_CREATE = 4`, `SYS_OBJ_SIZE = 5`, and
-`SYS_OBJ_DESTROY = 6` are preserved; their object semantics are not implemented.
+instruction, or byte. Milestone 4 now supplies the allocation and address-space
+foundations; a future Object Manager will supply stable identity, handles,
+permissions, lifetime, sharing, naming, ownership, and cleanup. Syscalls can then
+expose stable object operations, which must enter the NPK processing pipeline
+rather than bypass it. The existing syscall numbers `SYS_OBJ_CREATE = 4`,
+`SYS_OBJ_SIZE = 5`, and `SYS_OBJ_DESTROY = 6` are preserved; their object
+semantics are not implemented.
 
 ## 1. Purpose and scope
 
@@ -525,17 +582,18 @@ for future user processes, but there is no kernel dispatcher yet.
 
 ### 5.4 Initialization order
 
-The intended order as subsystems are added is:
+The implemented prefix of the initialization order is:
 
 1. architecturally required boot state (`sp`, `vbar`);
-2. boot marker and minimal debug state;
-3. Core initialization and panic formatting support;
-4. physical memory and kernel allocator;
-5. exception/trap frame support (implemented in Milestone 3);
-6. syscall dispatcher;
-7. device abstraction and timer;
-8. scheduler;
-9. executable loader and first user process.
+2. boot marker and the `NPK_OP_BOOT_VERIFY` pipeline;
+3. processing-core initialization and self-test;
+4. exception/trap observation state (Milestone 3);
+5. memory-manager state and published request entry (Milestone 4).
+
+Future milestones would add, in order, a syscall dispatcher, device abstraction
+and timer, scheduler, and executable loader. The coordinator in `kernel.c`
+currently calls only `npk_process_boot()`, `npk_trap_init()`, and
+`npk_memory_init()`.
 
 Each milestone may implement only the next coherent prefix of this order.
 
@@ -559,18 +617,25 @@ addresses are identical. The initial layout is:
 | Trap frame | `0x90900` | Milestone 3 304-byte Nova assembly trap frame |
 | Trap state | `0x90A40` | 128-byte trap dispatch observations |
 | Trap receipt log | `0x90B00` | Eight 128-byte trap receipts |
+| Memory entry | `0x90F00` | Published memory request entry address |
+| Memory state | `0x90F10` | 128-byte memory-manager observations |
+| Region table | `0x90F90` | 64 × 64-byte physical region descriptors |
+| Address spaces | `0x91F90` | 2 × 32-byte software page-table roots |
+| Memory request/response | `0x91FD0` / `0x92010` | 64-byte typed request and response blocks |
+| Memory receipt log | `0x92050` | 128 × 128-byte memory receipts |
+| Declared physical arena | `0xC0000`, `0x40000` bytes | Sparse-memory policy arena, not discovered RAM |
 | Unmapped/unused | elsewhere | No RAM bound is modeled by the emulator |
 
 The boot marker value is `0x4E504B31` (`"NPK1"`). It proves that the kernel
 entry ran and that the host loaded the image at the expected base. It is a
 debug/handshake mechanism, not a kernel API.
 
-Future address-space policy, to be enforced once MMU support lands:
-
-- low canonical half: kernel direct map and kernel heap;
-- high canonical half: user code, data, heap, and stacks;
-- user PTEs require the U bit and explicit R/W/X permissions;
-- kernel PTEs are never marked user-accessible.
+Milestone 4 enforces canonical virtual addresses, explicit R/W/X/U PTE bits,
+owner-scoped address spaces, and full `TLBI` invalidation on map/unmap. It does
+not yet implement a global low-kernel/high-user layout policy: that belongs to
+the future syscall/task/loader work. NPK currently maps both software address
+spaces through distinct roots owned by the requesting owner, and no process or
+user-executable concept exists.
 
 There is no ASID in Nova v1.0, so address-space switches use `ptbr` writes and
 the full TLB flush they cause. NPK must not claim ASID-tagged isolation.
@@ -636,7 +701,7 @@ it is zero after return.
 
 ## 9. Memory management architecture
 
-The existing translator is real and must be reused, not duplicated:
+The existing translator is real and is reused, not duplicated:
 
 - `ptbr[63]` enables four-level translation; `bits[51:12]` hold the root PPN;
 - leaf at level 3 = 4 KiB, level 2 = 2 MiB, level 1 = 1 GiB;
@@ -648,17 +713,27 @@ The existing translator is real and must be reused, not duplicated:
 - `TLBI` and `ptbr` writes flush translations; the TLB is a functional cache,
   not a hardware-exact structure.
 
-NPK will add, in order:
+Milestone 4 implements the NPK policy layer over this translator:
 
-1. a physical page allocator over a declared RAM range;
-2. a kernel page-table manager that constructs PTEs for Nova's format;
-3. a virtual address-space manager with explicit kernel/user policies;
-4. mapping, unmapping, protection, and fault handling;
-5. `TLBI` policy wrappers and address-space switching.
+1. a 4 KiB allocator over the declared `0xC0000..0x100000` arena with stable
+   region ids, owner, type, size, and live-map count;
+2. a page-table manager that constructs four-level Nova PTEs and allocates its
+   own table pages from the same arena;
+3. two software address spaces with independent roots and owner checks;
+4. map/unmap handlers with R/W/X/U permission validation and full `TLBI`;
+5. MMU fault behavior verified against the unmodified reference translator.
 
-Platform gaps to handle explicitly: no RAM-size model, no MMIO regions, no
-ASID, no TLB shootdown, and an ignored global PTE bit. These are limitations to
-design around, not behavior to invent.
+Physical pages are identified by base and size, not by host allocator objects.
+A region cannot be released while it has live mappings. `QUERY` observes a
+region without changing it. Allocation exhaustion is a `FAILED` execute result;
+bad ids, sizes, alignment, addresses, permissions, and ownership are `REJECTED`
+at validation; duplicate mappings are detected at commit and produce a distinct
+PTE-conflict failure rather than silently replacing the leaf.
+
+Platform gaps remain explicit: no RAM-size model, no MMIO regions, no ASID, no
+TLB shootdown, and an ignored global PTE bit. NPK does not invent hardware
+capabilities. There is no page replacement, demand paging, huge-page
+construction, memory protection keys, copy-on-write, or transactional rollback.
 
 ## 10. System-call architecture
 

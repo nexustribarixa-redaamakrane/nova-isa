@@ -21,8 +21,8 @@ finished. No future milestone is marked complete early.
 | 1 | NPK architecture and boot foundation | COMPLETE | Bootable deterministic `.nob` kernel image that processes and receipt-verifies boot work on `NovaMachine` |
 | 2 | Reusable processing core and operation management | COMPLETE | Typed operations, controlled lifecycle, processing-unit ownership, and receipt evidence tested |
 | 3 | Exception and trap subsystem | COMPLETE | Register-preserving trap frame and `MRET` return test |
-| 4 | Physical and virtual memory management | NOT STARTED | Allocation, mapping, permissions, faults, and address-space isolation tested |
-| 5 | Object Manager and Universal Object Model | PLANNED | Consistent kernel resource identity, handles, and lifetime management designed after memory foundations exist |
+| 4 | Physical and virtual memory management | COMPLETE | Allocation, mapping, permissions, faults, and address-space isolation tested |
+| 5 | Object Manager and Universal Object Model | PLANNED ONLY | Consistent kernel resource identity, handles, and lifetime management designed after memory foundations exist |
 | 6 | Syscall and privilege subsystem | NOT STARTED | In-kernel ABI dispatch with validation and error conversion tested |
 | 7 | Device abstraction and timer integration | NOT STARTED | Console/timer interfaces tested without invented devices |
 | 8 | Task management and cooperative scheduling | NOT STARTED | Deterministic task creation, yield, and switch tested |
@@ -321,39 +321,117 @@ to `origin/master`.
 
 ## Milestone 4 — Physical and virtual memory management
 
-**Objective.** Add a declared physical RAM range, frame allocator, kernel
-page-table manager, mapping/unmapping, permissions, fault handling, and TLB
-policy wrappers.
+**Status:** COMPLETE.
+
+**Objective.** Add an NPK-managed physical allocator, software page-table
+manager, owner-scoped address spaces, typed memory operations, permission
+validation, and `TLBI` invalidation while preserving Milestones 1–3 exactly.
 
 **Dependencies.** Milestones 1–3.
 
-**Files likely to change.** `nova/npk/memory.py`, kernel memory C/assembly,
-`tests/test_npk_memory.py`, architecture docs.
+**Files changed.**
+
+- `nova/npk/src/memory.c`: allocator, region/address-space tables, typed
+  validate/execute/commit handlers, page-table construction, and request wrapper.
+- `nova/npk/src/memory.s`: real `TLBI r0` full-invalidation helper.
+- `nova/npk/src/start.s`: publishes the memory request entry at `0x90F00`.
+- `nova/npk/src/kernel.c`: coordinator only; boot → trap → memory init.
+- `nova/npk/src/npk_core.h`, `nova/npk/src/processing.c`: memory operation
+  arguments, dedicated receipt routing, and core initialization.
+- `nova/npk/layout.py`, `nova/npk/core.py`, `nova/npk/memory.py`,
+  `nova/npk/__init__.py`: fixed layout, M4 op/reason constants, host decoders,
+  validators, and request-call helpers.
+- `nova/npk/build.py`: assembles and links the new M4 sources.
+- `tests/test_npk_memory.py`, `scripts/npk_validate.py`: 29 real-machine tests
+  and repeatable validation.
+- `docs/NPK_ARCHITECTURE.md`, `docs/PHASE2_PLAN.md`,
+  `docs/NPK_INITIATION_REPORT.md`, `docs/NPK_MILESTONE4_REPORT.md`.
 
 **Implementation scope.**
 
-- Physical frame allocator over an explicit base/size, not emulator internals.
-- Page tables using Nova PTE bits and 4 KiB/2 MiB/1 GiB leaves.
-- Map/unmap/protect APIs for kernel and early user spaces.
-- MMU fault handler uses `tval` and `ecause`.
-- Address-space switching by `ptbr` with full TLB flush; `TLBI` wrappers.
+- A declared 256 KiB physical arena at `0xC0000` over sparse reference memory,
+  with 4 KiB pages, aligned fit, stable region ids, owner, type, flags, and
+  live-map counts. No emulator internals or host allocator objects are used.
+- Five typed operations — `ALLOCATE`, `RELEASE`, `MAP`, `UNMAP`, `QUERY` — each
+  admitted through the shared processing core and advanced through all five
+  lifecycle stages.
+- A 64-slot region table, 2-slot address-space table, request/response block,
+  and independent 128-slot memory receipt log at fixed addresses. Boot work
+  never admits a memory operation and leaves M1–M2 counters/receipts unchanged.
+- Four-level Nova page-table construction with 4 KiB leaf PTEs and R/W/X/U bit
+  translation. The existing emulator translator enforces the resulting
+  permissions, A/D updates, `tval`, and `MMU_FAULT` details.
+- Release is rejected while a region has live mappings; unmap decrements the
+  region count and performs a full `TLBI r0` invalidation. Each address space
+  has an independent root and owner.
+- `REJECTED` is used for bad request shape, size, alignment, address,
+  permissions, region, address space, owner, or state. `FAILED` is used for
+  arena exhaustion and PTE conflicts discovered after validation.
 
-**Tests.** Allocation exhaustion, map/unmap, R/W/X/U permissions, missing and
-misaligned mappings, huge pages, fault details, TLB invalidation, isolation.
+**Tests.**
 
-**Acceptance criteria.** Kernel code constructs page tables through its own
-API and the emulator enforces the resulting permissions.
+- Boot-time memory initialization, published entry, zeroed observation regions,
+  unchanged M1 evidence, unchanged M2 counters, and zeroed main-core receipt
+  reserved words.
+- Allocation identity, region descriptors, allocation epoch, raw tag bytes,
+  query immutability, release, stale ids, double release, owner enforcement,
+  invalid sizes/alignment, and arena exhaustion recovery.
+- Four-level page-table walks, leaf PPN/permission bits, duplicate-map commit
+  failure, rejected-map immutability, unmap, double-unmap distinctions, and
+  release protection while mapped.
+- Two independent address spaces, paged guest code reading and writing mapped
+  memory, real user-permission enforcement, `tval`/failure details, and TLB
+  invalidation after unmap.
+- Dedicated memory receipts for complete, rejected, and failed outcomes, full
+  stage traces, receipt size/evidence words, and no mutation of the 12-slot M2
+  log.
+- A real trap still dispatches and completes after memory initialization.
 
-**Known limitations.** No ASID, no TLB shootdown, global PTE bit ignored by the
-platform, no MMIO regions, no RAM-size model in the reference emulator.
+**Acceptance criteria.** Every supported memory operation traverses
+`ADMIT → VALIDATE → EXECUTE → COMMIT → COMPLETE` or an explicit terminal
+`REJECTED`/`FAILED` path; every success receipt is checked against real page
+tables, descriptors, epochs, and memory bytes. Nova ISA v1.0, the Nova64 ABI,
+reserved syscall numbers, and M1–M3 behavior are unchanged.
 
-**Completion conditions.** Memory layout and policies documented, tests green,
-regression green, committed.
+**Known limitations.** The arena is a software policy region, not discovered
+RAM or a hardware frame pool. Only 4 KiB leaf mappings are constructed; the
+platform's 2 MiB and 1 GiB leaves are not used by NPK yet. There is no ASID,
+TLB shootdown, MMIO region, RAM-size model, global-bit policy, demand paging,
+copy-on-write, page replacement, executable loader, user process, or syscall
+service. Commit is not transactional: there is no rollback, journal, isolation,
+or durability guarantee, and a commit-time failure may leave earlier page-table
+allocations visible. PUs remain sequential; no SMP or preemption is claimed.
+This is not a physical-hardware implementation.
+
+**Validation result.**
+
+- `python -m pytest -q tests/test_npk.py tests/test_npk_core.py
+  tests/test_npk_exceptions.py tests/test_npk_memory.py`: **100 passed**
+  (71 M1–M3 plus 29 M4).
+- `python scripts/npk_validate.py`: **PASS** (NPK 100 passed; Phase 1 PASS).
+- `python scripts/phase1_validate.py`: **PASS**; counts unchanged (frontend 180,
+  sema 85, codegen 59, driver 55, runtime 15, library 1, end-to-end 13,
+  emulator 1831, example 1, conformance 18/18, compileall passed, full suite
+  2345).
+- `python -m pytest -q tests/test_documentation.py`: **17 passed**.
+- `python -m pytest -q`: **2345 passed** (Phase 1 baseline 2316 plus 29 M4
+  tests).
+- `python -m compileall -q nova tests scripts`: **passed**.
+- M1/M2 evidence unchanged: boot receipt magic `NPKP`, input `0x4E504B31`,
+  output `0x4E504B32`, status `1`, trace `1,2,3,4,5`; core counters
+  `admitted=10`, `completed=7`, `rejected=3`, `failed=2`,
+  `selftest_status=0`, both units idle, and all 12 M2 receipt reserved words
+  zero.
+- Full detail: `docs/NPK_MILESTONE4_REPORT.md`.
+
+**Completion conditions.** Memory layout and policies documented, all validation
+commands green, scoped commits created, and `master` clean and equal to
+`origin/master`.
 
 ## Milestone 5 — Object Manager and Universal Object Model
 
-**Status:** PLANNED. This is an architectural milestone only; no implementation
-is authorized in this task.
+**Status:** PLANNED ONLY. This is an architectural milestone only; no
+implementation is authorized in this task.
 
 **Objective.** Define a consistent kernel-resource management contract based on
 the Winoid principle "everything is an object." Interpret this as consistent
@@ -394,7 +472,7 @@ object semantics are not implemented by this planned milestone description.
 
 **Completion conditions (future).** A reviewed object contract, processing-core
 integration, tests, documentation, and a scoped commit. No object-manager code
-is part of the Milestone 3 implementation.
+is part of the Milestone 4 implementation.
 
 ## Milestone 6 — Syscall and privilege subsystem
 
