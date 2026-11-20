@@ -19,6 +19,13 @@ struct NpkOperation {
     npk_u64 outcome;
     npk_u64 receipt_index;
     npk_u64 receipt_base;
+    /* Milestone 4 memory arguments and committed-evidence helpers. */
+    npk_u64 memory_address;
+    npk_u64 memory_size;
+    npk_u64 memory_flags;
+    npk_u64 memory_aux;
+    npk_u64 memory_evidence;
+    npk_u64 memory_scratch;
 };
 
 #endif

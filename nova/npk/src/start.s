@@ -18,6 +18,13 @@ _npk_start:
     LI r1, 0x90000
     LI r2, 0x4E504B31
     STD r2, [r1]
+
+    ; Publish the typed memory request entry address for post-boot tests. This
+    ; is an observation word only; it admits no operations during boot.
+    LA r1, npk_memory_request
+    LI r2, 0x90F00
+    STD r1, [r2]
+
     LA ra, .Lnpk_halt
     BL npk_main
 .Lnpk_halt:

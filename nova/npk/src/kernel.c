@@ -3,13 +3,16 @@
  *
  * The assembly entry point owns all architectural setup. `npk_main` runs the
  * boot-processing pipeline, initializes the Milestone 3 trap observation state,
- * and returns success only when boot processing committed and completed. Trap
- * delivery itself is driven by the real Nova vector in `trap.s`; no allocator,
- * syscall service, device driver, scheduler, or user loader exists yet.
+ * initializes the Milestone 4 memory subsystem, and returns success only when
+ * every coordinator stage succeeds. Trap delivery is driven by the real Nova
+ * vector in `trap.s`; memory work is driven by the typed processing core from
+ * `memory.c`. There is still no syscall service, device driver, scheduler, or
+ * user loader.
  */
 
 int npk_process_boot(void);
 int npk_trap_init(void);
+int npk_memory_init(void);
 
 int npk_main(void)
 {
@@ -18,5 +21,9 @@ int npk_main(void)
     if (status != 0) {
         return status;
     }
-    return npk_trap_init();
+    status = npk_trap_init();
+    if (status != 0) {
+        return status;
+    }
+    return npk_memory_init();
 }

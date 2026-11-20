@@ -44,19 +44,24 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
     out.mkdir(parents=True, exist_ok=True)
     start_source = _source_path("start.s")
     trap_source = _source_path("trap.s")
+    memory_asm_source = _source_path("memory.s")
     kernel_source = _source_path("kernel.c")
     processing_source = _source_path("processing.c")
     trap_c_source = _source_path("trap.c")
+    memory_c_source = _source_path("memory.c")
     start_object = out / "npk_start.nobj"
     trap_object = out / "npk_trap_entry.nobj"
+    memory_asm_object = out / "npk_memory_flush.nobj"
     kernel_object = out / "npk_kernel.nobj"
     processing_object = out / "npk_processing.nobj"
     trap_c_object = out / "npk_trap_dispatch.nobj"
+    memory_c_object = out / "npk_memory.nobj"
     image_path = out / "npk.nob"
 
     try:
         for source, object_path in ((start_source, start_object),
-                                    (trap_source, trap_object)):
+                                    (trap_source, trap_object),
+                                    (memory_asm_source, memory_asm_object)):
             assembly = source.read_text(encoding="utf-8")
             obj = assemble_object(assembly)
             object_path.write_bytes(encode_object(obj))
@@ -76,13 +81,19 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
         cc_main([str(trap_c_source), *cc_options, "-o", str(trap_c_object)]),
         "nova-cc trap dispatch",
     )
+    _require_ok(
+        cc_main([str(memory_c_source), *cc_options, "-o", str(memory_c_object)]),
+        "nova-cc memory",
+    )
 
     try:
         objects = [
             load_object(start_object),
             load_object(trap_object),
+            load_object(memory_asm_object),
             load_object(processing_object),
             load_object(trap_c_object),
+            load_object(memory_c_object),
             load_object(kernel_object),
         ]
         image = link_objects(
@@ -101,7 +112,9 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
     if not keep_objects:
         start_object.unlink(missing_ok=True)
         trap_object.unlink(missing_ok=True)
+        memory_asm_object.unlink(missing_ok=True)
         processing_object.unlink(missing_ok=True)
         trap_c_object.unlink(missing_ok=True)
+        memory_c_object.unlink(missing_ok=True)
         kernel_object.unlink(missing_ok=True)
     return image_path
