@@ -22,7 +22,7 @@ finished. No future milestone is marked complete early.
 | 2 | Reusable processing core and operation management | COMPLETE | Typed operations, controlled lifecycle, processing-unit ownership, and receipt evidence tested |
 | 3 | Exception and trap subsystem | COMPLETE | Register-preserving trap frame and `MRET` return test |
 | 4 | Physical and virtual memory management | COMPLETE | Allocation, mapping, permissions, faults, and address-space isolation tested |
-| 5 | Object Manager and Universal Object Model | PLANNED ONLY | Consistent kernel resource identity, handles, and lifetime management designed after memory foundations exist |
+| 5 | Object Manager and Universal Object Model | COMPLETE | Typed object identity, handles, references, namespaces, access policy, destruction, and receipts tested |
 | 6 | Syscall and privilege subsystem | NOT STARTED | In-kernel ABI dispatch with validation and error conversion tested |
 | 7 | Device abstraction and timer integration | NOT STARTED | Console/timer interfaces tested without invented devices |
 | 8 | Task management and cooperative scheduling | NOT STARTED | Deterministic task creation, yield, and switch tested |
@@ -430,49 +430,119 @@ commands green, scoped commits created, and `master` clean and equal to
 
 ## Milestone 5 — Object Manager and Universal Object Model
 
-**Status:** PLANNED ONLY. This is an architectural milestone only; no
-implementation is authorized in this task.
+**Status:** COMPLETE.
 
-**Objective.** Define a consistent kernel-resource management contract based on
-the Winoid principle "everything is an object." Interpret this as consistent
-kernel-managed resource identity, typing, handles, permissions, and lifetime.
-It does not mean that every variable, register, instruction, or byte becomes a
-separately allocated object.
+**Objective.** Add a real NPK Object Manager that applies the Winoid principle
+"everything is an object" as one common contract for kernel-managed resources:
+identity, type, owner, lifetime, references, handles, access policy, namespace
+membership, and type-specific destruction. It does not mean one object per
+variable, register, instruction, or byte.
 
 **Dependencies.** Milestones 1–4.
 
-**Why here.** Memory management supplies the allocation and address-space
-foundations that object storage and sharing need. The Object Manager then
-provides stable identity, handles, and lifetime rules for kernel resources.
-Syscalls can subsequently expose object operations through a stable interface
-without baking object layout into the ABI. Future object operations must be
-admitted as NPK operations and processed through the existing
-`ADMIT → VALIDATE → EXECUTE → COMMIT → COMPLETE` pipeline, including rejection,
-failure, and receipt evidence.
+**Files changed.**
 
-**Architectural candidates, not implemented claims.** processes, threads,
-memory regions, address spaces, devices, files, events, timers, communication
-ports, and security/access tokens.
+- `nova/npk/src/objects.c`: object state, typed headers, handles, references,
+  type registry, namespace, typed validate/execute/commit handlers, and request
+  wrapper.
+- `nova/npk/src/processing.c`, `nova/npk/src/npk_core.h`: object operation
+  arguments, stable object identity, dedicated receipt routing, and extension
+  synchronization.
+- `nova/npk/src/kernel.c`, `nova/npk/src/start.s`: coordinator-only
+  initialization and the published object request entry.
+- `nova/npk/layout.py`, `nova/npk/core.py`, `nova/npk/objects.py`,
+  `nova/npk/__init__.py`: fixed layout, operation/reason constants, host
+  decoders, validators, and request-call helpers.
+- `nova/npk/build.py`: compiles and links the new object manager source.
+- `tests/test_npk_objects.py`, `scripts/npk_validate.py`: 23 real-machine tests
+  and repeatable validation.
+- `docs/NPK_ARCHITECTURE.md`, `docs/PHASE2_PLAN.md`,
+  `docs/NPK_INITIATION_REPORT.md`, `docs/NPK_MILESTONE5_REPORT.md`.
 
-**Design questions to review before implementation.**
+**Implementation scope.**
 
-- Object identity and type safety.
-- Object headers and metadata; the binary layout is explicitly not frozen.
-- Handles and handle tables.
-- Reference and handle lifetime semantics.
-- Creation, opening, closing, querying, referencing, dereferencing, and
-  destruction.
-- Access permissions and sharing between processes.
-- Optional object naming and parent/child ownership where appropriate.
-- Processing-pipeline integration, failure receipts, and resource cleanup.
+- Twelve typed operations — create, destroy, open, close, query, retain,
+  release, directory insert/remove/lookup, and type register/query — each
+  admitted through the shared core and advanced through all five stages.
+- Monotonic 64-bit object identities based on `0x4E504B4F00000000`, object state
+  magic `0x4E504B4F`, version `5`, and a canonical header-first 128-byte object
+  slot with a fixed inline body area.
+- Two owner-scoped handle tables of 64 generation-tagged slots. Handles pack
+  owner, generation, and index into 64 bits; stale and reused handles are
+  rejected.
+- References are the sum of handle, retain, and namespace references. Destruction
+  requires owner match, the `DESTROY` permission, and zero references; type
+  descriptors dispatch bounded cleanup actions through central C code rather
+  than C function pointers.
+- Permissions are `READ`, `WRITE`, `EXEC`, `SHARE`, and `DESTROY`. Same-owner
+  operations require handle ownership; cross-owner `OPEN` additionally requires
+  `SHARE` on both source handle and object and a requested subset of both
+  permission sets.
+- A fixed type registry has four built-in types and four runtime slots. Types
+  carry body size, valid operations, allowed access, and a destroy action.
+- A fixed root directory and 16 namespace entries support insertion, removal,
+  duplicate-name rejection, single-component names, and hierarchical paths up
+  to 32 bytes with no symbolic links. Namespace membership owns one reference.
+- M4 memory regions and address spaces can be wrapped as typed objects with
+  validation of the underlying owner. Cleanup calls the existing M4 release
+  service; a live mapping makes destruction fail without claiming rollback.
+- A 112-byte request block, 64-byte response block, 128 dedicated receipts, and
+  128 parallel 32-byte extension records expose object identity, handle,
+  packed counts, and namespace id without changing M1–M4 receipt words.
+- `kernel.c` remains coordinator-only; object policy lives in `objects.c`.
 
-**Nova ABI constraint.** Preserve the existing syscall numbers
-`SYS_OBJ_CREATE = 4`, `SYS_OBJ_SIZE = 5`, and `SYS_OBJ_DESTROY = 6`. Their
-object semantics are not implemented by this planned milestone description.
+**Tests.**
 
-**Completion conditions (future).** A reviewed object contract, processing-core
-integration, tests, documentation, and a scoped commit. No object-manager code
-is part of the Milestone 4 implementation.
+- Fixed-layout disjointness, boot-time object/type/namespace state, reserved
+  syscall numbers, and unchanged M1–M4 receipts, counters, trap path, and
+  memory behavior.
+- Type query, runtime registration, duplicate rejection, and invalid type ids.
+- Create/query/destroy, receipt extensions, close/double-close/stale handle
+  reuse, same-owner and cross-owner access, retain/release, owner checks, and
+  zero-reference destruction.
+- M4 payload wrapping, memory cleanup, commit failure with a live mapping,
+  namespace create/insert/lookup/remove lifetime, path/name validation, and
+  no-mutation rejection.
+- Bad magic, unknown operation, invalid request shapes, object-table and
+  handle-table exhaustion as `FAILED`, and dedicated receipt routing.
+
+**Acceptance criteria.** Every supported object operation traverses the shared
+five-stage lifecycle or an explicit terminal `REJECTED`/`FAILED` path with a
+specific reason and observable receipt. Identity, handle, reference, access,
+namespace, and destruction behavior are independently decoded from real kernel
+state. Nova ISA v1.0, the Nova64 ABI, Phase 1, and M1–M4 behavior are unchanged.
+
+**Known limitations.** Storage is fixed and static; there is no general kernel
+heap, dynamic type destruction, symbol table, symbolic link, ACL/token model,
+full NT security model, quotas, inheritance, multilevel handle table, 37-bucket
+hash table, broad callback matrix, process/thread identity, device/file object,
+scheduler, syscall dispatcher, user process, or loader. No synchronization is
+claimed: the core's processing units remain sequential and non-preemptive.
+Commit is not transactional; there is no rollback, journal, isolation, or
+durability. Namespace paths are flat component chains over a fixed table, not
+a general filesystem. Reserved syscall numbers `4`, `5`, and `6` remain
+unchanged and inert. This is not physical-hardware support.
+
+**Validation result.**
+
+- `python -m pytest -q tests/test_npk_objects.py`: **23 passed**.
+- `python -m pytest -q tests/test_npk.py tests/test_npk_core.py
+  tests/test_npk_exceptions.py tests/test_npk_memory.py
+  tests/test_npk_objects.py`: **123 passed** (100 M1–M4 plus 23 M5).
+- `python scripts/npk_validate.py`: **PASS** (NPK 123 passed; Phase 1 PASS).
+- `python scripts/phase1_validate.py`: **PASS**; counts unchanged (frontend 180,
+  sema 85, codegen 59, driver 55, runtime 15, library 1, end-to-end 13,
+  emulator 1831, example 1, conformance 18/18, compileall passed, full suite
+  2368).
+- `python -m pytest -q tests/test_documentation.py`: **17 passed**.
+- `python -m pytest -q`: **2368 passed** (2345 baseline plus 23 M5 tests).
+- `python -m compileall -q nova tests scripts`: **passed**.
+- Preserved M1/M2 evidence and all M3/M4 interfaces; full detail:
+  `docs/NPK_MILESTONE5_REPORT.md`.
+
+**Completion conditions.** Object design comparison, implementation, tests,
+documentation, and scoped commits complete; all validation commands green;
+`master` clean and equal to `origin/master`.
 
 ## Milestone 6 — Syscall and privilege subsystem
 

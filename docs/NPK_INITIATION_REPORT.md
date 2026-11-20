@@ -312,7 +312,7 @@ The authorized roadmap has ten milestones; the corrected current map is:
 | 2 | Reusable processing core and operation management | COMPLETE | Typed operations, lifecycle, unit ownership, receipts |
 | 3 | Exception and trap subsystem | COMPLETE | Register-preserving trap frame and `MRET` return |
 | 4 | Physical and virtual memory management | COMPLETE | Software allocation, mapping, permissions, faults, isolation |
-| 5 | Object Manager and Universal Object Model | PLANNED ONLY | Resource identity, handles, lifetime after memory foundations |
+| 5 | Object Manager and Universal Object Model | COMPLETE | Typed object identity, handles, references, namespaces, access policy, destruction, and receipts |
 | 6 | Syscall and privilege subsystem | NOT STARTED | In-kernel ABI dispatch with validation |
 | 7 | Device abstraction and timer integration | NOT STARTED | Real console/timer interfaces only |
 | 8 | Task management and cooperative scheduling | NOT STARTED | Task states, yield, deterministic switching |
@@ -320,10 +320,12 @@ The authorized roadmap has ten milestones; the corrected current map is:
 | 10 | Integrated validation and Phase 2 closeout | NOT STARTED | Full regression, report, clean synchronized push |
 
 Milestone 5 is deliberately placed after memory management: memory supplies
-allocation and address-space foundations, the Object Manager then supplies
-identity, handles, and lifetime rules, and syscalls expose stable object
-operations in Milestone 6. Future object operations must enter the NPK
-pipeline. Details are in `docs/PHASE2_PLAN.md`.
+allocation and address-space foundations, and the Object Manager supplies
+identity, handles, references, namespaces, access policy, and lifetime rules.
+Twelve object operations now enter the NPK pipeline with dedicated receipts.
+Syscalls may expose stable object operations in Milestone 6; reserved syscall
+numbers `4`, `5`, and `6` remain inert. Details are in `docs/PHASE2_PLAN.md`
+and `docs/NPK_MILESTONE5_REPORT.md`.
 
 ## 16. Risks and blockers
 

@@ -1,8 +1,8 @@
 # NPK — Nova Processed Kernel architecture
 
 **Status:** authoritative Phase 2 architecture baseline; Milestone 2 processing
-core, Milestone 3 exception/trap subsystem, and Milestone 4 memory subsystem
-implemented.
+core, Milestone 3 exception/trap subsystem, Milestone 4 memory subsystem, and
+Milestone 5 Object Manager implemented.
 
 **Kernel:** NPK — Nova Processed Kernel.  
 **Classification:** Winoid.  
@@ -38,11 +38,11 @@ conventional kernel function directly. It is admitted, validated, executed,
 committed, and receipted by a processing unit.
 
 The kernel work processed by NPK includes boot verification, exception and
-interrupt events, system-call requests, memory-management operations, device
-events, task transitions, and executable-loading requests. Boot verification,
-trap processing, and the five memory operations are implemented; system-call,
-device, task, and loader work remain architecture targets rather than
-implemented features.
+interrupt events, system-call requests, memory-management operations, object
+operations, device events, task transitions, and executable-loading requests.
+Boot verification, trap processing, the five memory operations, and the twelve
+object operations are implemented; system-call, device, task, and loader work
+remain architecture targets rather than implemented features.
 
 An operation is *processed* only when:
 
@@ -98,14 +98,14 @@ or claimed here.
 
 | Component | Responsibility | Status |
 | --- | --- | --- |
-| Operation producers | Create typed work from boot/trap/memory/syscall/device/loader events | Boot, trap, and post-boot memory producers implemented; syscall/device/loader producers remain future work |
-| `NpkOperation` | Carries operation code, input, stage cursor, provisional result, result, reason, and receipt index | Generalized typed records in Milestone 2; trap type added in Milestone 3; memory address/size/flags/aux/evidence fields added in Milestone 4 |
-| Processing units `PU0`/`PU1` | Own one operation each and drive stage advancement | Two sequential units in Milestone 2; memory operations use the same ownership model |
-| Stage handlers | Implement validate/execute/commit invariants per operation type | Boot, diagnostic, trap, and five memory operation types implemented |
-| Admission interface | Validates id/type, rejects duplicates, assigns a free unit, and emits a receipt | Implemented in Milestone 2; trap and memory operations use the same interface |
-| Receipt memory | Publishes stage trace and terminal result for host observation | Fixed boot receipt at `0x90008`; core log at `0x90220`; trap log at `0x90B00`; memory log at `0x92050` |
-| Core/operation snapshots | Expose counters, unit state, and operation slots to host tests | Implemented in Milestone 2; trap state at `0x90A40` in Milestone 3; memory state at `0x90F10` in Milestone 4 |
-| Processing coordinator | Submits work and checks the terminal result | `npk_main` and the Milestone 2 self-test; trap dispatch in `trap.c`; memory request wrapper in `memory.c` |
+| Operation producers | Create typed work from boot/trap/memory/object/syscall/device/loader events | Boot, trap, post-boot memory, and post-boot object producers implemented; syscall/device/loader producers remain future work |
+| `NpkOperation` | Carries operation code, input, stage cursor, provisional result, result, reason, receipt index, and typed evidence | Generalized typed records in Milestone 2; trap type added in Milestone 3; memory fields added in Milestone 4; stable object identity/handle/namespace fields added in Milestone 5 |
+| Processing units `PU0`/`PU1` | Own one operation each and drive stage advancement | Two sequential units in Milestone 2; memory and object operations use the same ownership model |
+| Stage handlers | Implement validate/execute/commit invariants per operation type | Boot, diagnostic, trap, five memory, and twelve object operation types implemented |
+| Admission interface | Validates id/type, rejects duplicates, assigns a free unit, and emits a receipt | Implemented in Milestone 2; trap, memory, and object operations use the same interface |
+| Receipt memory | Publishes stage trace and terminal result for host observation | Fixed boot receipt at `0x90008`; core log at `0x90220`; trap log at `0x90B00`; memory log at `0x92050`; object log at `0x9A190` plus extension records at `0x9EA10` |
+| Core/operation snapshots | Expose counters, unit state, and operation slots to host tests | Implemented in Milestone 2; trap state at `0x90A40` in Milestone 3; memory state at `0x90F10` in Milestone 4; object state at `0x96060` in Milestone 5 |
+| Processing coordinator | Submits work and checks the terminal result | `npk_main` and the Milestone 2 self-test; trap dispatch in `trap.c`; memory request wrapper in `memory.c`; object request wrapper in `objects.c` |
 | Scheduler | Chooses which unit/operation receives CPU time | Not implemented |
 
 Milestone 3 separated the kernel entry from this mechanism:
@@ -116,8 +116,9 @@ implements the operation pipeline and receipts. Milestone 4 adds
 `nova/npk/src/memory.c` for the software allocator, page-table construction,
 typed memory handlers, and published request wrapper, plus
 `nova/npk/src/memory.s` for the real `TLBI r0` full-flush helper.
-`nova/npk/src/kernel.c` is only a coordinator that initializes boot, trap, and
-memory subsystems in order.
+Milestone 5 adds `nova/npk/src/objects.c` for the typed object manager and its
+request wrapper. `nova/npk/src/kernel.c` remains only a coordinator that
+initializes boot, trap, memory, and object subsystems in order.
 
 ### Relationship between processing and scheduling
 
@@ -140,6 +141,7 @@ operations for processing units; they will not replace the pipeline.
 | --- | --- |
 | Exceptions | The Nova assembly vector saves the 304-byte software frame, admits an `NPK_OP_TRAP_PROCESS` operation, classifies the event, and restores the frame before `MRET`. |
 | Memory | `VALIDATE` declares address/range/permission requirements; `EXECUTE` performs mapped operations; a fault re-enters processing as a fault event. |
+| Object Manager | Object requests are admitted as typed operations; `VALIDATE` checks identity, handle, access, type, payload, and path invariants; `EXECUTE` reserves slots or computes a result; `COMMIT` publishes headers, handles, references, namespace entries, and type state. |
 | Syscalls | The trap adapter converts the frozen ABI call into a syscall operation; validation checks number, arguments, and user pointers; commit writes the `a0`/`a1` result. |
 | Devices | Interrupt adapters admit device-event operations; no driver bypasses validation or commits directly from an interrupt handler. |
 | Tasks | Task creation, yield, block, resume, and exit are processing operations; the TCB holds the processing state that survives a stage boundary. |
@@ -166,9 +168,11 @@ units, explicit commit publication, and receipt-backed evidence for rejection
 and failure paths. Milestone 3 extends them to machine-mode exception entry:
 every trapped event is processed through the same lifecycle before its result
 is published, and its own receipt records completion, rejection, or failure.
-None of these milestones guarantees transactional rollback, isolation,
-preemption, multiprocessing, nested exception handling, or general
-syscall/device processing.
+Milestone 5 extends evidence to object identity, handle, reference counts, and
+namespace membership while preserving earlier receipt words. None of these
+milestones guarantees transactional rollback, isolation, preemption,
+multiprocessing, nested exception handling, or general syscall/device
+processing.
 
 ### Difference from a conventional kernel
 
@@ -431,16 +435,110 @@ durability guarantee, and a commit-time failure may leave earlier page-table
 allocations visible. Boot work never admits a memory operation and leaves the
 Milestone 1–3 receipts and counters unchanged.
 
-**Planned Object Manager (Milestone 5, PLANNED ONLY).** The Winoid principle
-"everything is an object" is interpreted as a consistent contract for
-kernel-managed resources, not as one allocation per variable, register,
-instruction, or byte. Milestone 4 now supplies the allocation and address-space
-foundations; a future Object Manager will supply stable identity, handles,
-permissions, lifetime, sharing, naming, ownership, and cleanup. Syscalls can then
-expose stable object operations, which must enter the NPK processing pipeline
-rather than bypass it. The existing syscall numbers `SYS_OBJ_CREATE = 4`,
-`SYS_OBJ_SIZE = 5`, and `SYS_OBJ_DESTROY = 6` are preserved; their object
-semantics are not implemented.
+### Milestone 5 object manager
+
+The Winoid principle "everything is an object" is implemented as a common
+contract for kernel-managed resources, not as one allocation per variable,
+register, instruction, or byte. Milestone 4 supplies the memory payloads and
+address spaces that M5 can wrap; M5 supplies stable identity, type, ownership,
+handles, references, access checks, namespace membership, and lifetime. Syscalls
+may expose these operations in a later milestone, but every object operation
+already enters the NPK pipeline rather than bypassing it.
+
+The fixed object state uses magic `0x4E504B4F` and version `5`. Object ids begin
+at `0x4E504B4F00000000` and increase monotonically. Each 128-byte object slot
+begins with a canonical header — id, type, owner, parent, permissions, refcount,
+handle count, retain count, payload, creation epoch, state, namespace count —
+followed by three inline body words. Storage is static and fixed; there is no
+general kernel heap claim.
+
+Operations `9..20` are typed core operations:
+
+| Type | Operation | Main committed effect |
+| ---: | --- | --- |
+| `9` | `CREATE` | Publish a typed object and its initial handle; optionally insert a name |
+| `10` | `DESTROY` | Run the bounded type destructor and clear the object when references are zero |
+| `11` | `OPEN` | Create a second handle with a permissions subset |
+| `12` | `CLOSE` | Clear one handle and drop its reference |
+| `13` | `QUERY` | Observe header state without mutation |
+| `14` | `RETAIN` | Add a non-handle reference |
+| `15` | `RELEASE` | Drop one non-handle reference |
+| `16` | `DIRECTORY_INSERT` | Add a named child and one namespace reference |
+| `17` | `DIRECTORY_REMOVE` | Remove a named child and its namespace reference |
+| `18` | `DIRECTORY_LOOKUP` | Resolve `/` or component-wise paths without adding a reference |
+| `19` | `TYPE_REGISTER` | Activate one of the four runtime type slots |
+| `20` | `TYPE_QUERY` | Read an active type descriptor |
+
+Reasons `30..45` cover bad request, type, handle, object, owner, permission,
+state, exhaustion, duplicate, parent, payload, unsupported operation, name,
+missing entry, non-directory parent, and bad path. `REJECTED` means the request
+failed validation; `FAILED` means a capacity or commit-time destructor check
+failed after admission.
+
+A handle is `(owner << 56) | (generation << 16) | index`. Two owners each have
+64 slots. Generations make close/reuse observable and stale handles invalid.
+The lifetime equation is
+`refcount = handle_count + retain_count + namespace_count`. `DESTROY` requires
+the same owner, the `DESTROY` permission, no root identity, no namespace entry,
+and zero references. Permissions are `READ`, `WRITE`, `EXEC`, `SHARE`, and
+`DESTROY` (`0x1F`). Same-owner operations require matching handle ownership;
+cross-owner `OPEN` requires `SHARE` on both the source handle and object, plus a
+requested permission subset of both.
+
+The type registry has four built-in descriptors — generic, memory region,
+address space, and directory — plus four runtime slots. Descriptors record body
+size, valid operations, allowed access, and a small destroy action. Central C
+code dispatches those actions; the implementation does not store native function
+pointers. A directory is a typed object with a namespace table, and named M4
+payloads are validated against their M4 owner before wrapping. Memory-region
+destruction calls the existing M4 release service; a live mapping makes the
+object commit fail and is not silently rolled back.
+
+The namespace has a fixed root object at the object-id base, 16 entries, and a
+32-byte contiguous name buffer. Insert rejects duplicates; remove releases the
+namespace reference; lookup supports `/`, single components, and up to four
+components separated by `/`, with 16 bytes per component. Symbolic links are
+not implemented.
+
+M5 adds a 112-byte request block, a 64-byte response block, 128 dedicated core
+receipts, and 128 parallel 32-byte extension records. Extension words record
+`object_id`, `handle`, packed `refcount`/`handle_count`, and `namespace_id`. The
+M1–M4 receipt words remain unchanged; the extension is a parallel observation
+record, not an ABI. `kernel.c` only calls object initialization and self-test;
+object policy remains in `objects.c`.
+
+The reserved syscalls `SYS_OBJ_CREATE = 4`, `SYS_OBJ_SIZE = 5`, and
+`SYS_OBJ_DESTROY = 6` are unchanged and inert. There is no syscall dispatcher,
+process object, device object, file object, scheduler, user executable loader,
+symbol table, ACL/token security model, quota system, or physical-hardware
+claim. Commit is not transactional; no rollback, isolation, or durability is
+claimed. Processing units remain sequential and no synchronization model is
+claimed.
+
+### Object Manager Design: OpenWindows and WRK Comparison
+
+An external source study was completed before implementation. The OpenWindows
+project was reviewed at
+`https://github.com/nexustribarixa-redaamakrane/OpenWindows`, latest reviewed
+commit `9ea21e8007975191f12deba9be7db58d199349f8`. The Windows Research Kernel
+material was reviewed from the public mirror
+`https://github.com/ayyucedemirbas/Windows-Research-Kernel-WRK-` for WRK v1.2;
+the mirror was not independently authenticated against the official Microsoft
+distribution, and its files carry the WRK Source Code License notice. These
+sources informed design choices; no source was copied into NPK.
+
+| Source observation | What NPK adopted | Risk or behavior NPK deliberately avoided |
+| --- | --- | --- |
+| OpenWindows defines `OW_OBJECT_HEADER`, `OW_OBJECT_TYPE`, `OW_OBJECT_DIR`, and `OW_HANDLE` | A common header-first typed object, typed directories, and generation-tagged owner-scoped handles | A single high-water global handle table; NPK uses fixed owner tables with explicit free-slot search and generation validation |
+| OpenWindows exposes `OwObjInitialize()`, `OwObjCreateDirectory()`, `OwObjCreateObject()`, `OwObjReference()`, `OwObjDereference()`, `OwObjOpenByName()`, and `OwObjClose()` | Create, directory insert/lookup/remove, retain/release, open, and close as the core object vocabulary | Setting `HandleCount = 1` before a real handle exists; NPK derives refcount from real handle, retain, and namespace references |
+| OpenWindows closing a handle does not dereference the object | Explicit handle close drops exactly one handle reference | Lifetime errors from a hidden reference; NPK rejects destruction while any handle remains |
+| OpenWindows has no general unlink/delete path and allows duplicate directory names | Explicit directory remove and duplicate-name rejection | Unremovable names and ambiguous lookup results |
+| OpenWindows lookup is flat and header/body layout is inconsistent | One canonical 128-byte header-first slot and component-wise path resolution | Hidden body-layout assumptions and unbounded flat scans |
+| OpenWindows ignores access flags in several paths and has no synchronization | `READ`/`WRITE`/`EXEC`/`SHARE`/`DESTROY` checks, subset-based open, owner checks, and a sequential processing model | Claiming security or concurrency guarantees the implementation does not provide |
+| WRK separates header and body, uses type descriptors, and distinguishes pointer counts from handle counts | Header plus fixed inline body, descriptor tables, and separate `handle_count`/`retain_count`/`namespace_count` | Full NT object manager generality |
+| WRK separates object allocation from directory insertion and uses granted access per handle | Validation reserves state, commit publishes it; each handle stores its own permission subset | Mutable global permission assumptions |
+| WRK performs component-wise lookup and explicit close/delete ordering | Component-wise paths, zero-reference destruction, and ordered type destructors | Symlinks, case-insensitive naming, and implicit deletion |
+| WRK supports quotas, dynamic type objects, inheritance, hashing, multilevel handle tables, and broad callback matrices | Only bounded fixed tables and small central dispatch actions | Fabricated capacity, unsupported security semantics, native function pointers, and unproven synchronization |
 
 ## 1. Purpose and scope
 
@@ -588,12 +686,14 @@ The implemented prefix of the initialization order is:
 2. boot marker and the `NPK_OP_BOOT_VERIFY` pipeline;
 3. processing-core initialization and self-test;
 4. exception/trap observation state (Milestone 3);
-5. memory-manager state and published request entry (Milestone 4).
+5. memory-manager state and published request entry (Milestone 4);
+6. object-manager state, type registry, namespace, and published request entry
+   (Milestone 5).
 
 Future milestones would add, in order, a syscall dispatcher, device abstraction
 and timer, scheduler, and executable loader. The coordinator in `kernel.c`
-currently calls only `npk_process_boot()`, `npk_trap_init()`, and
-`npk_memory_init()`.
+calls `npk_process_boot()`, `npk_trap_init()`, `npk_memory_init()`,
+`npk_object_init()`, and `npk_object_selftest()` only.
 
 Each milestone may implement only the next coherent prefix of this order.
 
@@ -623,6 +723,16 @@ addresses are identical. The initial layout is:
 | Address spaces | `0x91F90` | 2 × 32-byte software page-table roots |
 | Memory request/response | `0x91FD0` / `0x92010` | 64-byte typed request and response blocks |
 | Memory receipt log | `0x92050` | 128 × 128-byte memory receipts |
+| Object entry | `0x96050` | Published object request entry address |
+| Object state | `0x96060` | 128-byte object-manager observations |
+| Object table | `0x960E0` | 64 × 128-byte typed object headers |
+| Handle tables | `0x980E0` | 2 owners × 64 × 64-byte handle slots |
+| Object request/response | `0x9A0E0` / `0x9A150` | 112-byte request and 64-byte response |
+| Object receipt log | `0x9A190` | 128 × 128-byte object receipts |
+| Type registry | `0x9E190` | 8 × 64-byte type descriptors |
+| Namespace entries | `0x9E390` | 16 × 96-byte directory entries |
+| Namespace state | `0x9E990` | 128-byte namespace observations |
+| Object receipt extensions | `0x9EA10` | 128 × 32-byte object evidence records |
 | Declared physical arena | `0xC0000`, `0x40000` bytes | Sparse-memory policy arena, not discovered RAM |
 | Unmapped/unused | elsewhere | No RAM bound is modeled by the emulator |
 
