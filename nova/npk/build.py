@@ -49,6 +49,7 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
     processing_source = _source_path("processing.c")
     trap_c_source = _source_path("trap.c")
     memory_c_source = _source_path("memory.c")
+    object_c_source = _source_path("objects.c")
     start_object = out / "npk_start.nobj"
     trap_object = out / "npk_trap_entry.nobj"
     memory_asm_object = out / "npk_memory_flush.nobj"
@@ -56,6 +57,7 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
     processing_object = out / "npk_processing.nobj"
     trap_c_object = out / "npk_trap_dispatch.nobj"
     memory_c_object = out / "npk_memory.nobj"
+    object_c_object = out / "npk_objects.nobj"
     image_path = out / "npk.nob"
 
     try:
@@ -85,6 +87,11 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
         cc_main([str(memory_c_source), *cc_options, "-o", str(memory_c_object)]),
         "nova-cc memory",
     )
+    _require_ok(
+        cc_main([str(object_c_source), *cc_options, "--long-branches",
+                 "-o", str(object_c_object)]),
+        "nova-cc objects",
+    )
 
     try:
         objects = [
@@ -94,6 +101,7 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
             load_object(processing_object),
             load_object(trap_c_object),
             load_object(memory_c_object),
+            load_object(object_c_object),
             load_object(kernel_object),
         ]
         image = link_objects(
@@ -116,5 +124,6 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
         processing_object.unlink(missing_ok=True)
         trap_c_object.unlink(missing_ok=True)
         memory_c_object.unlink(missing_ok=True)
+        object_c_object.unlink(missing_ok=True)
         kernel_object.unlink(missing_ok=True)
     return image_path

@@ -758,6 +758,75 @@ static npk_u64 npk_commit_release(struct NpkOperation *op)
     return NPK_REASON_NONE;
 }
 
+/* Milestone 5 payload services. These are internal kernel calls, not typed
+ * operations: the object manager invokes them from its own COMMIT stage. */
+int npk_memory_region_owned_by(npk_u64 region_id, npk_u64 owner)
+{
+    npk_u64 index = npk_find_region(region_id);
+    struct NpkMemoryRegion *region;
+
+    if (index == NPK_NO_INDEX) {
+        return 0;
+    }
+    region = npk_region(index);
+    if (region->state != NPK_REGION_ALLOCATED || region->owner != owner) {
+        return 0;
+    }
+    return 1;
+}
+
+int npk_memory_address_space_owned_by(npk_u64 index, npk_u64 owner)
+{
+    struct NpkMemoryState *state = npk_state();
+    struct NpkAddressSpace *space;
+
+    if (index >= state->address_space_slots) {
+        return 0;
+    }
+    space = npk_address_space(index);
+    if (space->state != NPK_ADDRESS_SPACE_ACTIVE || space->owner != owner) {
+        return 0;
+    }
+    return 1;
+}
+
+int npk_memory_release_for_object(npk_u64 region_id, npk_u64 owner)
+{
+    struct NpkMemoryState *state = npk_state();
+    npk_u64 index = npk_find_region(region_id);
+    struct NpkMemoryRegion *region;
+    npk_u64 base;
+
+    if (index == NPK_NO_INDEX) {
+        return NPK_REASON_MEMORY_BAD_REGION;
+    }
+    region = npk_region(index);
+    if (region->state != NPK_REGION_ALLOCATED) {
+        return NPK_REASON_MEMORY_STATE;
+    }
+    if (region->owner != owner) {
+        return NPK_REASON_MEMORY_OWNER;
+    }
+    if (region->reserved != 0) {
+        return NPK_REASON_MEMORY_STATE;
+    }
+    base = region->base;
+    region->state = NPK_REGION_FREE;
+    region->id = 0;
+    region->base = 0;
+    region->size = 0;
+    region->owner = 0;
+    region->type = 0;
+    region->flags = 0;
+    region->reserved = 0;
+    state->region_count = state->region_count - 1;
+    if (base < state->next_physical) {
+        state->next_physical = base;
+    }
+    state->allocation_epoch = state->allocation_epoch + 1;
+    return 0;
+}
+
 static npk_u64 npk_commit_map(struct NpkOperation *op)
 {
     struct NpkMemoryState *state = npk_state();

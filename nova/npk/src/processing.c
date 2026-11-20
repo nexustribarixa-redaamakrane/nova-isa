@@ -20,6 +20,7 @@
 #define NPK_RECEIPT_TABLE_ADDRESS 0x90220
 #define NPK_TRAP_RECEIPT_TABLE_ADDRESS 0x90B00
 #define NPK_MEMORY_RECEIPT_TABLE_ADDRESS 0x92050
+#define NPK_OBJECT_RECEIPT_TABLE_ADDRESS 0x9A190
 
 #define NPK_PROCESS_MAGIC 0x4E504B50
 #define NPK_CORE_MAGIC 0x4E504B43
@@ -31,6 +32,7 @@
 #define NPK_RECEIPT_SLOTS 12
 #define NPK_TRAP_RECEIPT_SLOTS 8
 #define NPK_MEMORY_RECEIPT_SLOTS 128
+#define NPK_OBJECT_RECEIPT_SLOTS 128
 #define NPK_STAGE_COUNT 5
 
 #define NPK_OP_BOOT_VERIFY 1
@@ -41,6 +43,18 @@
 #define NPK_OP_MEMORY_MAP 6
 #define NPK_OP_MEMORY_UNMAP 7
 #define NPK_OP_MEMORY_QUERY 8
+#define NPK_OP_OBJECT_CREATE 9
+#define NPK_OP_OBJECT_DESTROY 10
+#define NPK_OP_OBJECT_OPEN 11
+#define NPK_OP_OBJECT_CLOSE 12
+#define NPK_OP_OBJECT_QUERY 13
+#define NPK_OP_OBJECT_RETAIN 14
+#define NPK_OP_OBJECT_RELEASE 15
+#define NPK_OP_OBJECT_DIRECTORY_INSERT 16
+#define NPK_OP_OBJECT_DIRECTORY_REMOVE 17
+#define NPK_OP_OBJECT_DIRECTORY_LOOKUP 18
+#define NPK_OP_OBJECT_TYPE_REGISTER 19
+#define NPK_OP_OBJECT_TYPE_QUERY 20
 
 #define NPK_BOOT_INPUT 0x4E504B31
 #define NPK_PROCESSED_BOOT_OUTPUT 0x4E504B32
@@ -111,6 +125,18 @@
 #define NPK_REASON_MEMORY_UNSUPPORTED 27
 #define NPK_REASON_MEMORY_BAD_ADDRESS_SPACE 28
 #define NPK_REASON_MEMORY_PTE_CONFLICT 29
+#define NPK_REASON_OBJECT_BAD_REQUEST 30
+#define NPK_REASON_OBJECT_BAD_TYPE 31
+#define NPK_REASON_OBJECT_BAD_HANDLE 32
+#define NPK_REASON_OBJECT_BAD_OBJECT 33
+#define NPK_REASON_OBJECT_BAD_OWNER 34
+#define NPK_REASON_OBJECT_BAD_PERMISSION 35
+#define NPK_REASON_OBJECT_STATE 36
+#define NPK_REASON_OBJECT_EXHAUSTED 37
+#define NPK_REASON_OBJECT_DUPLICATE 38
+#define NPK_REASON_OBJECT_BAD_PARENT 39
+#define NPK_REASON_OBJECT_PAYLOAD 40
+#define NPK_REASON_OBJECT_UNSUPPORTED 41
 
 #define NPK_OK 0
 #define NPK_ERR_BAD_ID 1
@@ -194,6 +220,7 @@ static struct NpkProcessingUnit processing_units[NPK_PU_COUNT];
 static npk_u64 next_receipt_index;
 static npk_u64 next_trap_receipt_index;
 static npk_u64 next_memory_receipt_index;
+static npk_u64 next_object_receipt_index;
 
 static struct NpkLegacyReceipt *npk_legacy_receipt(void)
 {
@@ -223,6 +250,9 @@ static npk_u64 npk_trap_commit(struct NpkOperation *op);
 static npk_u64 npk_memory_validate(struct NpkOperation *op);
 static npk_u64 npk_memory_execute(struct NpkOperation *op);
 static npk_u64 npk_memory_commit(struct NpkOperation *op);
+static npk_u64 npk_object_validate(struct NpkOperation *op);
+static npk_u64 npk_object_execute(struct NpkOperation *op);
+static npk_u64 npk_object_commit(struct NpkOperation *op);
 static void npk_core_publish(struct NpkOperation *op);
 
 static struct NpkReceipt *npk_receipt_at(npk_u64 base, npk_u64 index)
@@ -247,6 +277,25 @@ static int npk_core_is_memory_type(npk_u64 type)
     return 0;
 }
 
+static int npk_core_is_object_type(npk_u64 type)
+{
+    if (type == NPK_OP_OBJECT_CREATE ||
+            type == NPK_OP_OBJECT_DESTROY ||
+            type == NPK_OP_OBJECT_OPEN ||
+            type == NPK_OP_OBJECT_CLOSE ||
+            type == NPK_OP_OBJECT_QUERY ||
+            type == NPK_OP_OBJECT_RETAIN ||
+            type == NPK_OP_OBJECT_RELEASE ||
+            type == NPK_OP_OBJECT_DIRECTORY_INSERT ||
+            type == NPK_OP_OBJECT_DIRECTORY_REMOVE ||
+            type == NPK_OP_OBJECT_DIRECTORY_LOOKUP ||
+            type == NPK_OP_OBJECT_TYPE_REGISTER ||
+            type == NPK_OP_OBJECT_TYPE_QUERY) {
+        return 1;
+    }
+    return 0;
+}
+
 static npk_u64 npk_core_receipt_base(npk_u64 type)
 {
     if (type == NPK_OP_TRAP_PROCESS) {
@@ -254,6 +303,9 @@ static npk_u64 npk_core_receipt_base(npk_u64 type)
     }
     if (npk_core_is_memory_type(type)) {
         return NPK_MEMORY_RECEIPT_TABLE_ADDRESS;
+    }
+    if (npk_core_is_object_type(type)) {
+        return NPK_OBJECT_RECEIPT_TABLE_ADDRESS;
     }
     return NPK_RECEIPT_TABLE_ADDRESS;
 }
@@ -266,6 +318,9 @@ static npk_u64 npk_core_receipt_slots(npk_u64 type)
     if (npk_core_is_memory_type(type)) {
         return NPK_MEMORY_RECEIPT_SLOTS;
     }
+    if (npk_core_is_object_type(type)) {
+        return NPK_OBJECT_RECEIPT_SLOTS;
+    }
     return NPK_RECEIPT_SLOTS;
 }
 
@@ -276,6 +331,9 @@ static npk_u64 *npk_core_next_receipt(npk_u64 type)
     }
     if (npk_core_is_memory_type(type)) {
         return &next_memory_receipt_index;
+    }
+    if (npk_core_is_object_type(type)) {
+        return &next_object_receipt_index;
     }
     return &next_receipt_index;
 }
@@ -292,6 +350,9 @@ static int npk_core_valid_type(npk_u64 type)
         return 1;
     }
     if (npk_core_is_memory_type(type)) {
+        return 1;
+    }
+    if (npk_core_is_object_type(type)) {
         return 1;
     }
     return 0;
@@ -373,6 +434,14 @@ static void npk_core_sync_receipt(struct NpkOperation *op)
     if (npk_core_is_memory_type(op->type)) {
         receipt->reserved[0] = op->memory_size;
         receipt->reserved[1] = op->memory_evidence;
+    }
+    if (npk_core_is_object_type(op->type)) {
+        receipt->reserved[0] = op->object_type;
+        receipt->reserved[1] = op->object_evidence;
+        if (op->receipt_index < NPK_OBJECT_RECEIPT_SLOTS) {
+            npk_object_clear_receipt_ext(op->receipt_index);
+            npk_object_sync_receipt_ext(op, op->receipt_index);
+        }
     }
 }
 
@@ -456,6 +525,7 @@ void npk_core_init(void)
     next_receipt_index = 0;
     next_trap_receipt_index = 0;
     next_memory_receipt_index = 0;
+    next_object_receipt_index = 0;
 
     for (i = 0; i < NPK_OP_SLOTS; i = i + 1) {
         operations[i].id = 0;
@@ -476,6 +546,19 @@ void npk_core_init(void)
         operations[i].memory_aux = 0;
         operations[i].memory_evidence = 0;
         operations[i].memory_scratch = 0;
+        operations[i].object_type = 0;
+        operations[i].object_flags = 0;
+        operations[i].object_parent = 0;
+        operations[i].object_payload = 0;
+        operations[i].object_evidence = 0;
+        operations[i].object_identity = 0;
+        operations[i].object_scratch = 0;
+        operations[i].object_name[0] = 0;
+        operations[i].object_name[1] = 0;
+        operations[i].object_name[2] = 0;
+        operations[i].object_name[3] = 0;
+        operations[i].object_handle = 0;
+        operations[i].object_namespace = 0;
     }
     for (i = 0; i < NPK_PU_COUNT; i = i + 1) {
         processing_units[i].id = i;
@@ -489,8 +572,8 @@ void npk_core_init(void)
     for (i = 0; i < NPK_TRAP_RECEIPT_SLOTS; i = i + 1) {
         npk_receipt_clear(npk_receipt_at(NPK_TRAP_RECEIPT_TABLE_ADDRESS, i));
     }
-    /* Memory receipts are zero-filled by sparse memory and each used slot is
-     * cleared by npk_core_init_receipt before it is published. */
+    /* Memory and object receipts are zero-filled by sparse memory and each
+     * used slot is cleared by npk_core_init_receipt before it is published. */
 
     state->admitted = 0;
     state->rejected = 0;
@@ -689,6 +772,45 @@ void npk_core_set_memory_arguments(npk_u64 slot, npk_u64 address,
     op->memory_scratch = 0;
 }
 
+void npk_core_set_object_arguments(npk_u64 slot, npk_u64 type, npk_u64 flags,
+                                   npk_u64 parent, npk_u64 payload)
+{
+    struct NpkOperation *op;
+
+    if (slot >= NPK_OP_SLOTS) {
+        return;
+    }
+    op = &operations[slot];
+    op->object_type = type;
+    op->object_flags = flags;
+    op->object_parent = parent;
+    op->object_payload = payload;
+    op->object_evidence = 0;
+    op->object_identity = 0;
+    op->object_scratch = 0;
+    op->object_name[0] = 0;
+    op->object_name[1] = 0;
+    op->object_name[2] = 0;
+    op->object_name[3] = 0;
+    op->object_handle = 0;
+    op->object_namespace = 0;
+}
+
+void npk_core_set_object_name(npk_u64 slot, npk_u64 word0, npk_u64 word1,
+                              npk_u64 word2, npk_u64 word3)
+{
+    struct NpkOperation *op;
+
+    if (slot >= NPK_OP_SLOTS) {
+        return;
+    }
+    op = &operations[slot];
+    op->object_name[0] = word0;
+    op->object_name[1] = word1;
+    op->object_name[2] = word2;
+    op->object_name[3] = word3;
+}
+
 static int npk_core_is_terminal(npk_u64 state)
 {
     if (state == NPK_OP_STATE_COMPLETE) {
@@ -762,6 +884,8 @@ int npk_core_advance_as(npk_u64 slot, npk_u64 requested_pu)
             reason = npk_trap_validate(op);
         } else if (npk_core_is_memory_type(op->type)) {
             reason = npk_memory_validate(op);
+        } else if (npk_core_is_object_type(op->type)) {
+            reason = npk_object_validate(op);
         } else {
             reason = npk_diag_validate(op);
         }
@@ -783,6 +907,8 @@ int npk_core_advance_as(npk_u64 slot, npk_u64 requested_pu)
             reason = npk_trap_execute(op);
         } else if (npk_core_is_memory_type(op->type)) {
             reason = npk_memory_execute(op);
+        } else if (npk_core_is_object_type(op->type)) {
+            reason = npk_object_execute(op);
         } else {
             reason = npk_diag_execute(op);
         }
@@ -804,6 +930,8 @@ int npk_core_advance_as(npk_u64 slot, npk_u64 requested_pu)
             reason = npk_trap_commit(op);
         } else if (npk_core_is_memory_type(op->type)) {
             reason = npk_memory_commit(op);
+        } else if (npk_core_is_object_type(op->type)) {
+            reason = npk_object_commit(op);
         } else {
             reason = npk_diag_commit(op);
         }
@@ -880,6 +1008,19 @@ int npk_core_release(npk_u64 slot)
     op->memory_aux = 0;
     op->memory_evidence = 0;
     op->memory_scratch = 0;
+    op->object_type = 0;
+    op->object_flags = 0;
+    op->object_parent = 0;
+    op->object_payload = 0;
+    op->object_evidence = 0;
+    op->object_identity = 0;
+    op->object_scratch = 0;
+    op->object_name[0] = 0;
+    op->object_name[1] = 0;
+    op->object_name[2] = 0;
+    op->object_name[3] = 0;
+    op->object_handle = 0;
+    op->object_namespace = 0;
 
     core->last_transition_status = NPK_OK;
     npk_core_publish_op(op);

@@ -25,6 +25,12 @@ _npk_start:
     LI r2, 0x90F00
     STD r1, [r2]
 
+    ; Publish the typed object request entry address for post-boot tests. This
+    ; is an observation word only; it admits no operations during boot.
+    LA r1, npk_object_request
+    LI r2, 0x96050
+    STD r1, [r2]
+
     LA ra, .Lnpk_halt
     BL npk_main
 .Lnpk_halt:
