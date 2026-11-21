@@ -610,3 +610,22 @@ The reference emulator is architectural: it models registers, the program counte
 **Known limitations:** the reference model is single-threaded; a `NovaCluster` steps harts cooperatively. Generation and index spaces are 32 bits each; an implementation must seed distinct generation spaces before merging independently created object containers, and the importer detects collisions rather than silently reinterpreting them. No hardware implementation is provided; the architecture conformance suite is the implementation-independent contract.
 
 **Tests:** the generated documentation tests, the full instruction-table conformance suite, the CSR/exception/interrupt tests, object and linker tests, example programs, and CLI end-to-end tests all run under `python -m pytest`. Additional v1.0 tests cover huge pages, stable object identities and import/export validation, virtual memory, atomics, interrupts, virtualization, the 64-bit profile, and the architecture conformance vectors (`python -m nova.conformance`).
+
+## 21. NPK kernel workflow
+
+The Phase 2 NPK kernel is built with the in-tree Nova toolchain. CMake only
+orchestrates that Python build:
+
+```sh
+cmake -S . -B build
+cmake --build build --target npk_kernel
+cmake --build build --target npk_validate
+cmake --build build --target npk_qemu_boot
+```
+
+`npk_qemu_boot` generates an x86-64 interpreter for the real `.nob` bytecode
+because QEMU has no Nova target. The image is loaded into a shadow region and
+its guest memory is compared with the Python reference boot. This is a
+validation harness, not native Nova support in QEMU, firmware, RTL, or hardware
+evidence. See `docs/NPK_ARCHITECTURE.md` and `docs/PHASE2_PLAN.md` for the full
+contract and limitations.

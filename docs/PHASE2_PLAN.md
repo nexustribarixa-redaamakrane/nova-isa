@@ -627,6 +627,45 @@ caller/kernel address-space split or hardware device support is claimed.
 **Completion conditions.** Dispatch contract documented, tests green,
 regression green, committed.
 
+## Kernel workflow — CMake and QEMU validation
+
+**Status:** IMPLEMENTED after Milestone 6; not a new Phase 2 milestone.
+
+The kernel build is orchestrated by the root `CMakeLists.txt`. CMake calls
+`scripts/npk_cmake_build.py`, which calls the same `nova.npk.build_kernel()`
+API used by the host tests. The generated `npk.nob` therefore still comes from
+the in-tree Nova assembler, compiler, linker, and `.nob` container. No host C
+compiler builds kernel code, and no second kernel source path exists.
+
+Targets:
+
+- `npk_kernel` (default): build `npk.nob` into `${build}/npk-kernel`.
+- `npk_validate`: run the NPK and Phase 1 regression suites.
+- `npk_qemu_boot`: build the kernel, generate a QEMU-loadable image, boot it in
+  `qemu-system-x86_64`, and compare guest memory with the reference boot.
+
+QEMU has no Nova target. `nova/npk/qemu_translator.py` does not add one. It
+emits an x86-64 multiboot ELF that interprets the real `.nob` bytecode in long
+mode. The Nova image is copied into a 1 MiB guest-physical shadow at
+`0x100000`; every Nova data address is offset into that shadow, so Nova software
+still observes its architectural stack, marker, receipt, and vector addresses.
+Generated interpreter code is placed above the shadow so an out-of-range Nova
+store cannot overwrite the host. This is a generated validation harness, not
+firmware, board support, RTL, or native QEMU Nova support.
+
+The validator checks the boot marker, exact step count, and a 64 KiB guest
+memory region against `boot_kernel()`. On this platform the real M6 kernel
+halts after `246745` interpreted Nova steps with the expected
+`0x4E504B31` marker and a byte-identical observation region.
+
+**Validation result.**
+
+- `cmake -S . -B <build>` and `cmake --build <build> --target npk_kernel`: PASS.
+- `cmake --build <build> --target npk_qemu_boot`: `QEMU boot: PASS`,
+  `boot marker: 0x4e504b31`, `steps: 246745`.
+- `python scripts/npk_qemu_boot.py --verbose`: PASS.
+- `python -m pytest -q tests/test_npk_qemu.py`: PASS.
+
 ## Milestone 7 — Device abstraction and timer integration
 
 **Objective.** Provide generic device interfaces only for capabilities the

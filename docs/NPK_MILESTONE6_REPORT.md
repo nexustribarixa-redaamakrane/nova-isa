@@ -187,8 +187,8 @@ validator aggregates were `NPK validation: PASS` and `Phase 1 validation: PASS`.
   device object, timer, or desktop integration.
 - Commit is not transactional. No rollback, isolation, or durability is claimed.
 - Nested software trap frames remain unsupported.
-- CMake and QEMU integration belongs to the kernel workflow, not the ISA
-  workflow; it is a separate follow-up and is not part of this M6 change.
+- CMake and QEMU integration was added after M6 as kernel-workflow tooling. It
+  does not change the ISA, ABI, syscall numbers, error codes, or M1–M6 behavior.
 - This is not RTL, firmware, board support, physical-hardware validation, Phase
   3, or OpenWindows/NovaOW/Oryn work.
 
@@ -206,3 +206,22 @@ Tests and tooling: `tests/test_npk_syscalls.py`, `scripts/npk_validate.py`,
 
 Documentation: `docs/NPK_MILESTONE6_RECONNAISSANCE.md`,
 `docs/NPK_ARCHITECTURE.md`, `docs/PHASE2_PLAN.md`, this report.
+
+## 12. Post-M6 kernel workflow
+
+The root `CMakeLists.txt` orchestrates the existing Nova toolchain through
+`scripts/npk_cmake_build.py` and `nova.npk.build_kernel()`. It adds `npk_kernel`,
+`npk_validate`, and `npk_qemu_boot` targets without introducing a host C build
+of kernel sources.
+
+`scripts/npk_qemu_boot.py` and `nova/npk/qemu_translator.py` provide an honest
+QEMU workaround. QEMU has no Nova target; the tool generates an x86-64 multiboot
+ELF that interprets the real `.nob` bytecode. The image is loaded into a
+1 MiB guest-physical shadow and Nova addresses are offset into it, while the
+interpreter itself is placed above the shadow. The validator compares the boot
+marker, exact step count (`246745`), and 64 KiB of guest memory against the
+Python reference boot.
+
+This tooling validates the same processed M6 kernel as `boot_kernel()`; it is
+not native Nova execution in QEMU, firmware, board support, RTL, physical
+hardware validation, or an ISA change.

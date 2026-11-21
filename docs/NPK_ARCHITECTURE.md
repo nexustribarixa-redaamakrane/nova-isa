@@ -758,6 +758,27 @@ system-call frame to `npk_syscall_dispatch()`.
 
 Each milestone may implement only the next coherent prefix of this order.
 
+### 5.5 Build and QEMU validation workflow
+
+The root `CMakeLists.txt` orchestrates this build through
+`scripts/npk_cmake_build.py`, which calls `nova.npk.build_kernel()`. CMake is a
+workflow wrapper only: the kernel is still assembled, compiled, and linked by
+the Nova toolchain, and the output is still the same deterministic `.nob`.
+
+The `npk_qemu_boot` target runs `scripts/npk_qemu_boot.py`. QEMU has no Nova
+target, so the script generates an x86-64 multiboot ELF from the real `.nob`
+image. Its long-mode stub interprets Nova instructions in generated code. The
+Nova image is placed in a 1 MiB guest-physical shadow at `0x100000`, and the
+interpreter adds that offset to Nova data addresses; Nova software therefore
+sees its architectural stack, marker, receipt, and vector addresses. Generated
+interpreter code is placed above the shadow to avoid self-overwrite.
+
+This harness validates the boot marker, exact step count, and a 64 KiB guest
+memory region against the Python reference boot. It is not native Nova support
+in QEMU, firmware, board support, RTL, physical-hardware validation, or an ISA
+change. It never changes the Nova64 ABI, syscall numbers, errors, or M1–M6
+behavior.
+
 ## 6. Kernel memory layout
 
 Milestone 1 runs in bare translation mode (`ptbr = 0`), so virtual and physical
@@ -1010,7 +1031,9 @@ NPK uses existing reference-model observability:
 - `nova-objdump` and `nova.disassembler` for image inspection;
 - `nova.nox` debug containers for source/line and call-frame metadata;
 - `nova-run --dump-regs` and host-side register reads;
-- boot markers for deterministic early-boot assertions.
+- boot markers for deterministic early-boot assertions;
+- the generated QEMU interpreter image and guest-memory dump comparison for
+  harness-only boot validation, not hardware or native-QEMU evidence.
 
 No GDB stub, hardware trace, or in-kernel debugger is claimed.
 
