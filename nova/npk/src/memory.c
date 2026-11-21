@@ -827,6 +827,52 @@ int npk_memory_release_for_object(npk_u64 region_id, npk_u64 owner)
     return 0;
 }
 
+/* Milestone 6 user-pointer service. This is a read-only walk of the mappings
+ * built by M4; it never installs a mapping or changes page-table state. The
+ * explicit user-bit check is required because machine-mode translation in the
+ * reference emulator does not enforce PTE_USER. */
+npk_u64 npk_memory_user_physical(npk_u64 address, npk_u64 access,
+                                 npk_u64 *out_physical)
+{
+    struct NpkAddressSpace *space;
+    npk_u64 root;
+    npk_u64 pte;
+    npk_u64 table;
+    npk_u64 level;
+
+    if (npk_memory_address_space_owned_by(0, 1) == 0) {
+        return NPK_REASON_MEMORY_BAD_ADDRESS_SPACE;
+    }
+    if (npk_is_canonical(address) == 0) {
+        return NPK_REASON_MEMORY_BAD_MAPPING;
+    }
+    space = npk_address_space(0);
+    root = space->root;
+    if (root == 0) {
+        return NPK_REASON_MEMORY_BAD_ADDRESS_SPACE;
+    }
+    for (level = 0; level < 3; level = level + 1) {
+        table = npk_table_address(root, npk_page_table_index(address, level));
+        pte = *((npk_u64 *)table);
+        if ((pte & NPK_PTE_VALID) == 0 || (pte & 0xE) != 0) {
+            return NPK_REASON_MEMORY_BAD_MAPPING;
+        }
+        root = pte & NPK_PTE_PPN_MASK;
+    }
+    table = npk_table_address(root, npk_page_table_index(address, 3));
+    pte = *((npk_u64 *)table);
+    if ((pte & NPK_PTE_VALID) == 0 ||
+            (pte & NPK_PTE_USER) == 0 ||
+            (pte & NPK_PTE_READ) == 0) {
+        return NPK_REASON_MEMORY_BAD_MAPPING;
+    }
+    if (access == 2 && (pte & NPK_PTE_WRITE) == 0) {
+        return NPK_REASON_MEMORY_BAD_MAPPING;
+    }
+    *out_physical = (pte & NPK_PTE_PPN_MASK) | (address & 0xFFF);
+    return NPK_REASON_NONE;
+}
+
 static npk_u64 npk_commit_map(struct NpkOperation *op)
 {
     struct NpkMemoryState *state = npk_state();

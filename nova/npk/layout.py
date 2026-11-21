@@ -104,6 +104,19 @@ NAMESPACE_STATE_SIZE = 128
 OBJECT_RECEIPT_EXT_ADDRESS = 0x9EA10
 OBJECT_RECEIPT_EXT_SIZE = 32
 
+#: Milestone 6 syscall observation regions. The syscall service has no request
+#: entry of its own: calls enter through the real M3 SCALL trap path. These
+#: regions hold dispatch state, bounded receipts, the bounded write sink, and
+#: the uncommitted copy buffer used by SYS_WRITE.
+SYSCALL_STATE_ADDRESS = 0x9FA10
+SYSCALL_STATE_SIZE = 128
+SYSCALL_RECEIPT_TABLE_ADDRESS = 0x9FA90
+SYSCALL_RECEIPT_SLOTS = 8
+SYSCALL_WRITE_LOG_ADDRESS = 0x9FE90
+SYSCALL_WRITE_LOG_SIZE = 256
+SYSCALL_SCRATCH_ADDRESS = 0x9FF90
+SYSCALL_SCRATCH_SIZE = 64
+
 #: NPK-declared physical arena. NovaMachine has no RAM-size model, so this is a
 #: kernel policy region over sparse address space, not a hardware frame pool.
 PHYSICAL_ARENA_BASE = 0xC0000
@@ -184,6 +197,14 @@ __all__ = [
     "NAMESPACE_STATE_SIZE",
     "OBJECT_RECEIPT_EXT_ADDRESS",
     "OBJECT_RECEIPT_EXT_SIZE",
+    "SYSCALL_STATE_ADDRESS",
+    "SYSCALL_STATE_SIZE",
+    "SYSCALL_RECEIPT_TABLE_ADDRESS",
+    "SYSCALL_RECEIPT_SLOTS",
+    "SYSCALL_WRITE_LOG_ADDRESS",
+    "SYSCALL_WRITE_LOG_SIZE",
+    "SYSCALL_SCRATCH_ADDRESS",
+    "SYSCALL_SCRATCH_SIZE",
     "PHYSICAL_ARENA_BASE",
     "PHYSICAL_ARENA_SIZE",
     "MEMORY_PAGE_SIZE",

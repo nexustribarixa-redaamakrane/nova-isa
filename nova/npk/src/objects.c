@@ -659,6 +659,57 @@ static int npk_handle_object(npk_u64 handle, npk_u64 *owner,
     return *object_index != NPK_NO_INDEX;
 }
 
+/* Milestone 6 read-only handle services. They expose existing M5 handle/object
+ * state to the syscall layer without introducing a second object model. */
+npk_u64 npk_object_id_for_handle(npk_u64 handle, npk_u64 owner)
+{
+    npk_u64 decoded_owner;
+    npk_u64 generation;
+    npk_u64 index;
+    npk_u64 object_index;
+
+    if (npk_handle_object(handle, &decoded_owner, &generation, &index,
+                          &object_index) == 0 || decoded_owner != owner) {
+        return NPK_NO_INDEX;
+    }
+    return npk_object(object_index)->id;
+}
+
+npk_u64 npk_object_payload_for_handle(npk_u64 handle, npk_u64 owner)
+{
+    npk_u64 decoded_owner;
+    npk_u64 generation;
+    npk_u64 index;
+    npk_u64 object_index;
+
+    if (npk_handle_object(handle, &decoded_owner, &generation, &index,
+                          &object_index) == 0 || decoded_owner != owner) {
+        return NPK_NO_INDEX;
+    }
+    return npk_object(object_index)->payload;
+}
+
+npk_u64 npk_object_handle_for_id(npk_u64 object_id, npk_u64 owner)
+{
+    struct NpkHandleSlot *slot;
+    npk_u64 i;
+
+    if (owner < 1 || owner > NPK_HANDLE_OWNERS) {
+        return NPK_NO_INDEX;
+    }
+    for (i = 0; i < NPK_HANDLE_SLOTS; i = i + 1) {
+        slot = npk_handle_slot(owner, i);
+        if (slot->state != NPK_HANDLE_STATE_ACTIVE ||
+                npk_find_object(slot->object_id) == NPK_NO_INDEX) {
+            continue;
+        }
+        if (slot->object_id == object_id) {
+            return npk_encode_handle(owner, slot->generation, i);
+        }
+    }
+    return NPK_NO_INDEX;
+}
+
 static npk_u64 npk_install_handle(npk_u64 owner, npk_u64 index,
                                   npk_u64 object_index, npk_u64 permissions,
                                   npk_u64 *out_handle)
@@ -1839,4 +1890,41 @@ int npk_object_request(void)
         npk_core_release(slot);
     }
     return (int)state->last_status;
+}
+
+/* Milestone 6 syscall bridge. The syscall subsystem chooses the M5 operation,
+ * but all object state changes continue to happen through the real M5 request
+ * path and its typed processing-core operations. */
+int npk_object_syscall_request(struct NpkObjectSyscallRequest *request,
+                               npk_u64 *out_result, npk_u64 *out_reason,
+                               npk_u64 *out_receipt)
+{
+    struct NpkObjectRequest *m5_request = npk_request();
+    struct NpkObjectResponse *m5_response = npk_response();
+    npk_u64 i;
+    int status;
+
+    if (request == 0 || out_result == 0 || out_reason == 0 ||
+            out_receipt == 0) {
+        return NPK_REQUEST_BAD_REQUEST;
+    }
+    m5_request->magic = NPK_OBJECT_REQUEST_MAGIC;
+    m5_request->operation = request->operation;
+    m5_request->id = request->id;
+    m5_request->owner = request->owner;
+    m5_request->type = request->type;
+    m5_request->handle = request->handle;
+    m5_request->permissions = request->permissions;
+    m5_request->payload = request->payload;
+    m5_request->parent = request->parent;
+    m5_request->aux = request->aux;
+    for (i = 0; i < NPK_NAME_WORDS; i = i + 1) {
+        m5_request->name[i] = request->name[i];
+    }
+
+    status = npk_object_request();
+    *out_result = m5_response->result;
+    *out_reason = m5_response->reason;
+    *out_receipt = m5_response->receipt_index;
+    return status;
 }

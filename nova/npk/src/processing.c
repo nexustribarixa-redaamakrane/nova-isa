@@ -21,6 +21,7 @@
 #define NPK_TRAP_RECEIPT_TABLE_ADDRESS 0x90B00
 #define NPK_MEMORY_RECEIPT_TABLE_ADDRESS 0x92050
 #define NPK_OBJECT_RECEIPT_TABLE_ADDRESS 0x9A190
+#define NPK_SYSCALL_RECEIPT_TABLE_ADDRESS 0x9FA90
 
 #define NPK_PROCESS_MAGIC 0x4E504B50
 #define NPK_CORE_MAGIC 0x4E504B43
@@ -33,6 +34,7 @@
 #define NPK_TRAP_RECEIPT_SLOTS 8
 #define NPK_MEMORY_RECEIPT_SLOTS 128
 #define NPK_OBJECT_RECEIPT_SLOTS 128
+#define NPK_SYSCALL_RECEIPT_SLOTS 8
 #define NPK_STAGE_COUNT 5
 
 #define NPK_OP_BOOT_VERIFY 1
@@ -55,6 +57,7 @@
 #define NPK_OP_OBJECT_DIRECTORY_LOOKUP 18
 #define NPK_OP_OBJECT_TYPE_REGISTER 19
 #define NPK_OP_OBJECT_TYPE_QUERY 20
+#define NPK_OP_SYSCALL_SERVICE 21
 
 #define NPK_BOOT_INPUT 0x4E504B31
 #define NPK_PROCESSED_BOOT_OUTPUT 0x4E504B32
@@ -137,6 +140,17 @@
 #define NPK_REASON_OBJECT_BAD_PARENT 39
 #define NPK_REASON_OBJECT_PAYLOAD 40
 #define NPK_REASON_OBJECT_UNSUPPORTED 41
+#define NPK_REASON_SYSCALL_BAD_FRAME 46
+#define NPK_REASON_SYSCALL_BAD_STATE 47
+#define NPK_REASON_SYSCALL_BAD_NUMBER 48
+#define NPK_REASON_SYSCALL_BAD_ARGUMENT 49
+#define NPK_REASON_SYSCALL_BAD_PRIVILEGE 50
+#define NPK_REASON_SYSCALL_BAD_POINTER 51
+#define NPK_REASON_SYSCALL_UNSUPPORTED 52
+#define NPK_REASON_SYSCALL_NO_RESOURCE 53
+#define NPK_REASON_SYSCALL_NOT_FOUND 54
+#define NPK_REASON_SYSCALL_COMMIT 55
+#define NPK_REASON_SYSCALL_CHILD 56
 
 #define NPK_OK 0
 #define NPK_ERR_BAD_ID 1
@@ -221,6 +235,7 @@ static npk_u64 next_receipt_index;
 static npk_u64 next_trap_receipt_index;
 static npk_u64 next_memory_receipt_index;
 static npk_u64 next_object_receipt_index;
+static npk_u64 next_syscall_receipt_index;
 
 static struct NpkLegacyReceipt *npk_legacy_receipt(void)
 {
@@ -296,6 +311,8 @@ static int npk_core_is_object_type(npk_u64 type)
     return 0;
 }
 
+#define npk_core_is_syscall_type(type) ((type) == NPK_OP_SYSCALL_SERVICE)
+
 static npk_u64 npk_core_receipt_base(npk_u64 type)
 {
     if (type == NPK_OP_TRAP_PROCESS) {
@@ -306,6 +323,9 @@ static npk_u64 npk_core_receipt_base(npk_u64 type)
     }
     if (npk_core_is_object_type(type)) {
         return NPK_OBJECT_RECEIPT_TABLE_ADDRESS;
+    }
+    if (npk_core_is_syscall_type(type)) {
+        return NPK_SYSCALL_RECEIPT_TABLE_ADDRESS;
     }
     return NPK_RECEIPT_TABLE_ADDRESS;
 }
@@ -321,6 +341,9 @@ static npk_u64 npk_core_receipt_slots(npk_u64 type)
     if (npk_core_is_object_type(type)) {
         return NPK_OBJECT_RECEIPT_SLOTS;
     }
+    if (npk_core_is_syscall_type(type)) {
+        return NPK_SYSCALL_RECEIPT_SLOTS;
+    }
     return NPK_RECEIPT_SLOTS;
 }
 
@@ -334,6 +357,9 @@ static npk_u64 *npk_core_next_receipt(npk_u64 type)
     }
     if (npk_core_is_object_type(type)) {
         return &next_object_receipt_index;
+    }
+    if (npk_core_is_syscall_type(type)) {
+        return &next_syscall_receipt_index;
     }
     return &next_receipt_index;
 }
@@ -353,6 +379,9 @@ static int npk_core_valid_type(npk_u64 type)
         return 1;
     }
     if (npk_core_is_object_type(type)) {
+        return 1;
+    }
+    if (npk_core_is_syscall_type(type)) {
         return 1;
     }
     return 0;
@@ -443,6 +472,10 @@ static void npk_core_sync_receipt(struct NpkOperation *op)
             npk_object_sync_receipt_ext(op, op->receipt_index);
         }
     }
+    if (npk_core_is_syscall_type(op->type)) {
+        receipt->reserved[0] = op->syscall_number;
+        receipt->reserved[1] = op->syscall_error;
+    }
 }
 
 static void npk_core_sync_legacy(struct NpkOperation *op)
@@ -526,6 +559,7 @@ void npk_core_init(void)
     next_trap_receipt_index = 0;
     next_memory_receipt_index = 0;
     next_object_receipt_index = 0;
+    next_syscall_receipt_index = 0;
 
     for (i = 0; i < NPK_OP_SLOTS; i = i + 1) {
         operations[i].id = 0;
@@ -572,8 +606,8 @@ void npk_core_init(void)
     for (i = 0; i < NPK_TRAP_RECEIPT_SLOTS; i = i + 1) {
         npk_receipt_clear(npk_receipt_at(NPK_TRAP_RECEIPT_TABLE_ADDRESS, i));
     }
-    /* Memory and object receipts are zero-filled by sparse memory and each
-     * used slot is cleared by npk_core_init_receipt before it is published. */
+    /* Memory, object, and syscall receipts are zero-filled by sparse memory
+     * and each used slot is cleared before it is published. */
 
     state->admitted = 0;
     state->rejected = 0;
@@ -742,6 +776,15 @@ int npk_core_admit(npk_u64 type, npk_u64 id, npk_u64 input, npk_u64 *out_slot)
     op->memory_aux = 0;
     op->memory_evidence = 0;
     op->memory_scratch = 0;
+    op->syscall_number = 0;
+    op->syscall_error = 0;
+    op->syscall_arg[0] = 0;
+    op->syscall_arg[1] = 0;
+    op->syscall_arg[2] = 0;
+    op->syscall_arg[3] = 0;
+    op->syscall_arg[4] = 0;
+    op->syscall_arg[5] = 0;
+    op->syscall_child_receipt = NPK_NO_INDEX;
     *next = *next + 1;
 
     processing_units[pu].state = NPK_PU_BUSY;
@@ -809,6 +852,23 @@ void npk_core_set_object_name(npk_u64 slot, npk_u64 word0, npk_u64 word1,
     op->object_name[1] = word1;
     op->object_name[2] = word2;
     op->object_name[3] = word3;
+}
+
+void npk_core_set_syscall_arguments(npk_u64 slot, npk_u64 number,
+                                    npk_u64 error, npk_u64 *args)
+{
+    struct NpkOperation *op;
+    npk_u64 i;
+
+    if (slot >= NPK_OP_SLOTS) {
+        return;
+    }
+    op = &operations[slot];
+    op->syscall_number = number;
+    op->syscall_error = error;
+    for (i = 0; i < 6; i = i + 1) {
+        op->syscall_arg[i] = args[i];
+    }
 }
 
 static int npk_core_is_terminal(npk_u64 state)
@@ -886,6 +946,8 @@ int npk_core_advance_as(npk_u64 slot, npk_u64 requested_pu)
             reason = npk_memory_validate(op);
         } else if (npk_core_is_object_type(op->type)) {
             reason = npk_object_validate(op);
+        } else if (npk_core_is_syscall_type(op->type)) {
+            reason = npk_syscall_validate(op);
         } else {
             reason = npk_diag_validate(op);
         }
@@ -909,6 +971,8 @@ int npk_core_advance_as(npk_u64 slot, npk_u64 requested_pu)
             reason = npk_memory_execute(op);
         } else if (npk_core_is_object_type(op->type)) {
             reason = npk_object_execute(op);
+        } else if (npk_core_is_syscall_type(op->type)) {
+            reason = npk_syscall_execute(op);
         } else {
             reason = npk_diag_execute(op);
         }
@@ -932,6 +996,8 @@ int npk_core_advance_as(npk_u64 slot, npk_u64 requested_pu)
             reason = npk_memory_commit(op);
         } else if (npk_core_is_object_type(op->type)) {
             reason = npk_object_commit(op);
+        } else if (npk_core_is_syscall_type(op->type)) {
+            reason = npk_syscall_commit(op);
         } else {
             reason = npk_diag_commit(op);
         }
@@ -1021,6 +1087,15 @@ int npk_core_release(npk_u64 slot)
     op->object_name[3] = 0;
     op->object_handle = 0;
     op->object_namespace = 0;
+    op->syscall_number = 0;
+    op->syscall_error = 0;
+    op->syscall_arg[0] = 0;
+    op->syscall_arg[1] = 0;
+    op->syscall_arg[2] = 0;
+    op->syscall_arg[3] = 0;
+    op->syscall_arg[4] = 0;
+    op->syscall_arg[5] = 0;
+    op->syscall_child_receipt = NPK_NO_INDEX;
 
     core->last_transition_status = NPK_OK;
     npk_core_publish_op(op);
@@ -1058,6 +1133,22 @@ npk_u64 npk_core_operation_receipt_index(npk_u64 slot)
         return NPK_NO_INDEX;
     }
     return operations[slot].receipt_index;
+}
+
+npk_u64 npk_core_operation_syscall_error(npk_u64 slot)
+{
+    if (slot >= NPK_OP_SLOTS) {
+        return 0;
+    }
+    return operations[slot].syscall_error;
+}
+
+npk_u64 npk_core_operation_syscall_child_receipt(npk_u64 slot)
+{
+    if (slot >= NPK_OP_SLOTS) {
+        return NPK_NO_INDEX;
+    }
+    return operations[slot].syscall_child_receipt;
 }
 
 int npk_core_probe_busy_unit(npk_u64 pu)

@@ -45,25 +45,30 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
     start_source = _source_path("start.s")
     trap_source = _source_path("trap.s")
     memory_asm_source = _source_path("memory.s")
+    syscalls_asm_source = _source_path("syscalls.s")
     kernel_source = _source_path("kernel.c")
     processing_source = _source_path("processing.c")
     trap_c_source = _source_path("trap.c")
     memory_c_source = _source_path("memory.c")
     object_c_source = _source_path("objects.c")
+    syscalls_c_source = _source_path("syscalls.c")
     start_object = out / "npk_start.nobj"
     trap_object = out / "npk_trap_entry.nobj"
     memory_asm_object = out / "npk_memory_flush.nobj"
+    syscalls_asm_object = out / "npk_syscall_time.nobj"
     kernel_object = out / "npk_kernel.nobj"
     processing_object = out / "npk_processing.nobj"
     trap_c_object = out / "npk_trap_dispatch.nobj"
     memory_c_object = out / "npk_memory.nobj"
     object_c_object = out / "npk_objects.nobj"
+    syscalls_c_object = out / "npk_syscalls.nobj"
     image_path = out / "npk.nob"
 
     try:
         for source, object_path in ((start_source, start_object),
                                     (trap_source, trap_object),
-                                    (memory_asm_source, memory_asm_object)):
+                                    (memory_asm_source, memory_asm_object),
+                                    (syscalls_asm_source, syscalls_asm_object)):
             assembly = source.read_text(encoding="utf-8")
             obj = assemble_object(assembly)
             object_path.write_bytes(encode_object(obj))
@@ -92,6 +97,10 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
                  "-o", str(object_c_object)]),
         "nova-cc objects",
     )
+    _require_ok(
+        cc_main([str(syscalls_c_source), *cc_options, "-o", str(syscalls_c_object)]),
+        "nova-cc syscalls",
+    )
 
     try:
         objects = [
@@ -103,6 +112,8 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
             load_object(memory_c_object),
             load_object(object_c_object),
             load_object(kernel_object),
+            load_object(syscalls_asm_object),
+            load_object(syscalls_c_object),
         ]
         image = link_objects(
             objects,
@@ -121,9 +132,11 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
         start_object.unlink(missing_ok=True)
         trap_object.unlink(missing_ok=True)
         memory_asm_object.unlink(missing_ok=True)
+        syscalls_asm_object.unlink(missing_ok=True)
         processing_object.unlink(missing_ok=True)
         trap_c_object.unlink(missing_ok=True)
         memory_c_object.unlink(missing_ok=True)
         object_c_object.unlink(missing_ok=True)
+        syscalls_c_object.unlink(missing_ok=True)
         kernel_object.unlink(missing_ok=True)
     return image_path

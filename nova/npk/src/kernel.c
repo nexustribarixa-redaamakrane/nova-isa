@@ -15,6 +15,7 @@ int npk_trap_init(void);
 int npk_memory_init(void);
 int npk_object_init(void);
 int npk_object_selftest(void);
+int npk_syscall_init(void);
 
 int npk_main(void)
 {
@@ -35,5 +36,9 @@ int npk_main(void)
     if (status != 0) {
         return status;
     }
-    return npk_object_selftest();
+    status = npk_object_selftest();
+    if (status != 0) {
+        return status;
+    }
+    return npk_syscall_init();
 }

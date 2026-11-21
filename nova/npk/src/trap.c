@@ -56,16 +56,6 @@
 #define NPK_TRAP_STATUS_ADMIT 3
 #define NPK_TRAP_STATUS_ADVANCE 4
 
-struct NpkTrapFrame {
-    npk_u64 gpr[32];
-    npk_u64 psr;
-    npk_u64 epc;
-    npk_u64 ecause;
-    npk_u64 ecode;
-    npk_u64 handler_priv;
-    npk_u64 tval;
-};
-
 struct NpkTrapState {
     npk_u64 magic;
     npk_u64 version;
@@ -208,6 +198,8 @@ int npk_trap_dispatch(struct NpkTrapFrame *frame)
     npk_u64 i;
     int status;
     int outcome;
+    int syscall_status = 0;
+    int syscall_handoff = 0;
 
     if (frame != npk_frame()) {
         state->last_status = NPK_TRAP_STATUS_BAD_FRAME;
@@ -224,46 +216,67 @@ int npk_trap_dispatch(struct NpkTrapFrame *frame)
     state->last_ecause = frame->ecause;
     state->last_epc = frame->epc;
     state->last_tval = frame->tval;
-    state->classification = NPK_CLASS_NONE;
-    state->action = NPK_ACTION_NONE;
+    /* Classification is a fact about the saved trap frame. Publish it before
+     * core admission so Milestone 6 can still hand a SYSTEM_CALL to the syscall
+     * service if the trap receipt log is already bounded and full. */
+    state->classification = npk_trap_classification(frame->ecode);
+    state->action = npk_trap_action(state->classification);
     state->result = 0;
     state->receipt_index = NPK_NO_INDEX;
     state->last_reason = NPK_REASON_NONE;
 
     id = state->dispatch_count;
+    slot = NPK_NO_INDEX;
     status = npk_core_admit(NPK_OP_TRAP_PROCESS, id,
                             NPK_TRAP_FRAME_ADDRESS, &slot);
     if (status != NPK_OK) {
+        /* A full trap log must not silently swallow a valid system call. The
+         * syscall service has its own bounded log and publishes its own
+         * NO_RESOURCE error when that log is full. */
         state->last_status = NPK_TRAP_STATUS_ADMIT;
         state->last_op_slot = NPK_NO_INDEX;
-        return NPK_TRAP_STATUS_ADMIT;
+        syscall_handoff = 1;
+    } else {
+        for (i = 0; i < 5; i = i + 1) {
+            outcome = npk_core_operation_outcome(slot);
+            if (outcome != NPK_OUTCOME_PENDING) {
+                break;
+            }
+            status = npk_core_advance(slot);
+            if (status != NPK_OK) {
+                state->last_status = NPK_TRAP_STATUS_ADVANCE;
+                break;
+            }
+        }
+
+        state->last_op_slot = slot;
+        state->last_reason = npk_core_operation_reason(slot);
+        state->result = npk_core_operation_result(slot);
+        state->receipt_index = npk_core_operation_receipt_index(slot);
+        if (status == NPK_OK) {
+            outcome = npk_core_operation_outcome(slot);
+            if (outcome == NPK_OUTCOME_COMPLETE) {
+                state->last_status = NPK_TRAP_STATUS_OK;
+                syscall_handoff = 1;
+            } else {
+                status = NPK_TRAP_STATUS_ADVANCE;
+                state->last_status = status;
+            }
+        }
+        npk_core_release(slot);
     }
 
-    for (i = 0; i < 5; i = i + 1) {
-        outcome = npk_core_operation_outcome(slot);
-        if (outcome != NPK_OUTCOME_PENDING) {
-            break;
-        }
-        status = npk_core_advance(slot);
-        if (status != NPK_OK) {
-            state->last_status = NPK_TRAP_STATUS_ADVANCE;
-            break;
-        }
+    /* Milestone 6: a validated SYSTEM_CALL trap hands the saved frame to the
+     * dedicated syscall subsystem, even if the M3 trap receipt log could not
+     * admit its own operation. A trap operation that rejected or failed the
+     * frame is not handed off. The syscall service owns a fresh core operation
+     * and receipt; trap.s restores its frame results before MRET. */
+    if (syscall_handoff == 1 &&
+            state->classification == NPK_CLASS_SYSTEM_CALL &&
+            frame->ecode == 7 && frame->epc % 4 == 0 &&
+            frame->handler_priv == 2) {
+        syscall_status = npk_syscall_dispatch(frame);
+        state->reserved[0] = (npk_u64)syscall_status;
     }
-
-    state->last_op_slot = slot;
-    state->last_reason = npk_core_operation_reason(slot);
-    state->result = npk_core_operation_result(slot);
-    state->receipt_index = npk_core_operation_receipt_index(slot);
-    if (status == NPK_OK) {
-        outcome = npk_core_operation_outcome(slot);
-        if (outcome == NPK_OUTCOME_COMPLETE) {
-            state->last_status = NPK_TRAP_STATUS_OK;
-        } else {
-            status = NPK_TRAP_STATUS_ADVANCE;
-            state->last_status = status;
-        }
-    }
-    npk_core_release(slot);
     return status;
 }
