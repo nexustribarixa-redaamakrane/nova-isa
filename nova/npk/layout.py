@@ -117,6 +117,21 @@ SYSCALL_WRITE_LOG_SIZE = 256
 SYSCALL_SCRATCH_ADDRESS = 0x9FF90
 SYSCALL_SCRATCH_SIZE = 64
 
+#: Milestone 7 device observation regions. These describe only the console sink
+#: behind SYS_WRITE and the architectural timer/interrupt CSRs; no MMIO device,
+#: device tree, interrupt controller, or physical hardware is declared.
+DEVICE_STATE_ADDRESS = 0xA1000
+DEVICE_STATE_SIZE = 144
+DEVICE_STATE_MAGIC = 0x4E504B44  # "NPKD" in little-endian byte order
+DEVICE_STATE_VERSION = 1
+DEVICE_INTERRUPT_LOG_ADDRESS = 0xA1090
+DEVICE_INTERRUPT_ENTRY_SIZE = 32
+DEVICE_INTERRUPT_SLOTS = 16
+DEVICE_CAPABILITY_TABLE_ADDRESS = 0xA1290
+DEVICE_CAPABILITY_ENTRY_SIZE = 32
+DEVICE_CAPABILITY_SLOTS = 8
+DEVICE_LAYOUT_LIMIT = 0xB0000
+
 #: NPK-declared physical arena. NovaMachine has no RAM-size model, so this is a
 #: kernel policy region over sparse address space, not a hardware frame pool.
 PHYSICAL_ARENA_BASE = 0xC0000
@@ -205,6 +220,17 @@ __all__ = [
     "SYSCALL_WRITE_LOG_SIZE",
     "SYSCALL_SCRATCH_ADDRESS",
     "SYSCALL_SCRATCH_SIZE",
+    "DEVICE_STATE_ADDRESS",
+    "DEVICE_STATE_SIZE",
+    "DEVICE_STATE_MAGIC",
+    "DEVICE_STATE_VERSION",
+    "DEVICE_INTERRUPT_LOG_ADDRESS",
+    "DEVICE_INTERRUPT_ENTRY_SIZE",
+    "DEVICE_INTERRUPT_SLOTS",
+    "DEVICE_CAPABILITY_TABLE_ADDRESS",
+    "DEVICE_CAPABILITY_ENTRY_SIZE",
+    "DEVICE_CAPABILITY_SLOTS",
+    "DEVICE_LAYOUT_LIMIT",
     "PHYSICAL_ARENA_BASE",
     "PHYSICAL_ARENA_SIZE",
     "MEMORY_PAGE_SIZE",

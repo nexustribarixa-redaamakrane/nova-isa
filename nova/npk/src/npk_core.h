@@ -20,6 +20,13 @@ struct NpkTrapFrame {
 int npk_syscall_init(void);
 int npk_syscall_dispatch(struct NpkTrapFrame *frame);
 
+/* Milestone 7 device entry points used by the coordinator, trap path, and
+ * syscall commit path. Device policy stays in devices.c. */
+int npk_device_init(void);
+int npk_device_console_commit(npk_u64 scratch, npk_u64 sink, npk_u64 offset,
+                              npk_u64 count);
+int npk_device_interrupt(npk_u64 classification, npk_u64 ecause, npk_u64 epc);
+
 /* Shared with the trap handlers; the core owns all writes to these fields. */
 struct NpkOperation {
     npk_u64 id;

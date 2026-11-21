@@ -11,9 +11,10 @@
  * Nova ISA v1.0 does not expose the pre-trap privilege in the software trap
  * frame; the recorded handler privilege is always machine mode. The subsystem
  * validates that machine-mode handler context, but it cannot claim caller
- * privilege enforcement. There is no process model, scheduler, or device layer
- * here. SYS_EXIT and SYS_YIELD record policy requests without terminating or
- * scheduling anything, and SYS_WRITE uses a bounded kernel observation sink.
+ * privilege enforcement. There is no process model or scheduler here. SYS_EXIT
+ * and SYS_YIELD record policy requests without terminating or scheduling
+ * anything, and SYS_WRITE publishes to the bounded console sink owned by the
+ * Milestone 7 device backend.
  */
 
 #include "npk_core.h"
@@ -571,7 +572,6 @@ npk_u64 npk_syscall_commit(struct NpkOperation *op)
     struct NpkTrapFrame *frame = (struct NpkTrapFrame *)op->input;
     struct NpkSyscallState *state = npk_state();
     npk_u64 count;
-    npk_u64 byte;
     npk_u64 i;
 
     if (op->memory_scratch != NPK_SYSCALL_STAGE_MAGIC) {
@@ -584,10 +584,11 @@ npk_u64 npk_syscall_commit(struct NpkOperation *op)
             op->syscall_error = NPK_ERROR_NO_RESOURCE;
             return NPK_REASON_SYSCALL_NO_RESOURCE;
         }
-        for (i = 0; i < count; i = i + 1) {
-            byte = npk_load_byte(NPK_SYSCALL_SCRATCH_ADDRESS + i);
-            npk_store_byte(NPK_SYSCALL_WRITE_LOG_ADDRESS +
-                           state->write_log_count + i, byte);
+        if (npk_device_console_commit(NPK_SYSCALL_SCRATCH_ADDRESS,
+                                      NPK_SYSCALL_WRITE_LOG_ADDRESS,
+                                      state->write_log_count, count) != 0) {
+            op->syscall_error = NPK_ERROR_NO_RESOURCE;
+            return NPK_REASON_SYSCALL_COMMIT;
         }
         state->write_log_count = state->write_log_count + count;
     } else if (op->syscall_number == NPK_SYS_EXIT) {

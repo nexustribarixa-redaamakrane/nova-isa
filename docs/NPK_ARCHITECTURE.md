@@ -2,8 +2,8 @@
 
 **Status:** authoritative Phase 2 architecture baseline; Milestone 2 processing
 core, Milestone 3 exception/trap subsystem, Milestone 4 memory subsystem,
-Milestone 5 Object Manager, and Milestone 6 syscall and privilege-context
-processing implemented.
+Milestone 5 Object Manager, Milestone 6 syscall and privilege-context processing,
+and Milestone 7 device/timer integration implemented.
 
 **Kernel:** NPK — Nova Processed Kernel.  
 **Classification:** Winoid.  
@@ -99,14 +99,14 @@ or claimed here.
 
 | Component | Responsibility | Status |
 | --- | --- | --- |
-| Operation producers | Create typed work from boot/trap/memory/object/syscall/device/loader events | Boot, trap, post-boot memory, post-boot object, and syscall producers implemented; device/loader producers remain future work |
+| Operation producers | Create typed work from boot/trap/memory/object/syscall/device/loader events | Boot, trap, post-boot memory, post-boot object, syscall, and device-interrupt/console producers implemented; loader producers remain future work |
 | `NpkOperation` | Carries operation code, input, stage cursor, provisional result, result, reason, receipt index, and typed evidence | Generalized typed records in Milestone 2; trap type added in Milestone 3; memory fields added in Milestone 4; stable object identity/handle/namespace fields added in Milestone 5 |
 | Processing units `PU0`/`PU1` | Own one operation each and drive stage advancement | Two sequential units in Milestone 2; memory and object operations use the same ownership model |
-| Stage handlers | Implement validate/execute/commit invariants per operation type | Boot, diagnostic, trap, five memory, and twelve object operation types implemented |
+| Stage handlers | Implement validate/execute/commit invariants per operation type | Boot, diagnostic, trap, five memory, twelve object, and syscall operation types implemented; device interrupts use the trap operation path |
 | Admission interface | Validates id/type, rejects duplicates, assigns a free unit, and emits a receipt | Implemented in Milestone 2; trap, memory, and object operations use the same interface |
 | Receipt memory | Publishes stage trace and terminal result for host observation | Fixed boot receipt at `0x90008`; core log at `0x90220`; trap log at `0x90B00`; memory log at `0x92050`; object log at `0x9A190` plus extension records at `0x9EA10` |
 | Core/operation snapshots | Expose counters, unit state, and operation slots to host tests | Implemented in Milestone 2; trap state at `0x90A40` in Milestone 3; memory state at `0x90F10` in Milestone 4; object state at `0x96060` in Milestone 5 |
-| Processing coordinator | Submits work and checks the terminal result | `npk_main` and the Milestone 2 self-test; trap dispatch in `trap.c`; memory request wrapper in `memory.c`; object request wrapper in `objects.c` |
+| Processing coordinator | Submits work and checks the terminal result | `npk_main` and the Milestone 2 self-test; trap dispatch in `trap.c`; memory request wrapper in `memory.c`; object request wrapper in `objects.c`; device backends called from trap/syscall paths |
 | Scheduler | Chooses which unit/operation receives CPU time | Not implemented |
 
 Milestone 3 separated the kernel entry from this mechanism:
@@ -352,6 +352,7 @@ Trap classification is by `ecode`:
 | `ecode` | Class | Action |
 | ---: | --- | --- |
 | `7` (`SYSTEM_CALL`) | system call | classify, service through the Milestone 6 syscall subsystem, and resume after the call |
+| `8` (`INTERRUPT`) | software/timer/external interrupt | classify by low `ecause` source bits, service through the Milestone 7 device backend, and resume |
 | `10` (`SOFTWARE_TRAP`) | software trap | resume after the trap instruction |
 | `1` (`ILLEGAL_INSTRUCTION`), `3` (`MEMORY_FAULT`), `4` (`ALIGNMENT_FAULT`), `9` (`MMU_FAULT`) | fault | report and resume at the faulting PC |
 | other assigned codes | unsupported | fail the operation and report; do not claim a service |
@@ -360,9 +361,11 @@ Trap classification is by `ecode`:
 Milestone 3 introduced the classification and frame contract. Milestone 6 now
 services `SYSTEM_CALL` through a separate syscall operation without changing that
 classification: `a0`/`a1` results are written into the saved frame before `MRET`,
-and supported object numbers reach the Milestone 5 manager. Codes `2`, `5`, `6`,
-`8`, and `11` remain recognized as assigned but unsupported exception classes and
-produce a distinct `FAILED` trap receipt.
+and supported object numbers reach the Milestone 5 manager. Milestone 7 services
+`ecode == 8` by the architectural `ecause` source bits (`0` software, `1` timer,
+`2` external) instead of treating all interrupts as one unsupported class. Codes
+`2`, `5`, `6`, and `11` remain recognized as assigned but unsupported exception
+classes and produce a distinct `FAILED` trap receipt.
 
 The dispatcher allocates an `NPK_OP_TRAP_PROCESS` operation through the ordinary
 admission interface and advances it through `ADMIT → VALIDATE → EXECUTE → COMMIT →
@@ -571,6 +574,43 @@ to guest kernel software. Consequently M6 validates the handler context but does
 address-space split. M6 also adds no device, timer, scheduler, loader, or new
 syscall number.
 
+### Milestone 7 device abstraction and timer integration
+
+Milestone 7 adds `nova/npk/src/devices.c` and `nova/npk/src/devices.s` without
+moving device policy into `kernel.c`, `trap.c`, or `syscalls.c`. The coordinator
+calls `npk_device_init()`; the syscall commit path calls
+`npk_device_console_commit()`; the trap execute path calls
+`npk_device_interrupt()`. No new operation type or syscall number is introduced.
+
+The console backend does not invent a serial device. `SYS_WRITE` continues to
+stage bytes in the M6 scratch buffer and commit them to the M6 write log; the
+device backend owns that commit and counts calls/bytes. The host-side
+`devices.publish_console()` helper mirrors those bytes into the reference
+machine's `machine.io_log`. Nova itself has no I/O instruction, and NPK never
+calls the Phase 1 host syscall dispatcher.
+
+Timer and interrupt support uses only the architectural CSRs `time`, `timecmp`,
+`ie`, `ip`, and `ivec`. The assembly leaves in `devices.s` return values in `r7`
+(the `nova-cc` C return register) and mirror reads into `a0`. On `ecode == 8`,
+`trap.c` classifies the low `ecause` source bits as software (`0`), timer (`1`),
+or external (`2`) and invokes the device backend. The backend records bounded
+evidence and, for a timer interrupt, writes a new aligned one-shot `timecmp`.
+The interval is large enough for the unoptimized C trap path to finish before a
+new compare can fire. The emulator clears the delivered `ip` bit and appends the
+source to `irq_log`; NPK does not model an interrupt controller.
+
+The M7 observation layout is bounded and disjoint from M1–M6 evidence: state at
+`0xA1000` (144 bytes), interrupt log at `0xA1090` (16 × 32 bytes), capability
+table at `0xA1290` (8 × 32 bytes), and a layout limit of `0xB0000`. The
+capability table marks console and timer supported and block, input, and network
+explicitly unsupported. Host decoders in `nova/npk/devices.py` validate this
+contract but are test helpers, not guest APIs.
+
+Milestone 7 claims no MMIO device, device tree, framebuffer, keyboard, disk,
+network, hardware interrupt source, preemptive scheduler, process model, or user
+loader. Software IPIs and external interrupts are architectural events injected
+by the reference machine for tests; they are not physical device drivers.
+
 ### Object Manager Design: OpenWindows and WRK Comparison
 
 An external source study was completed before implementation. The OpenWindows
@@ -749,12 +789,13 @@ The implemented prefix of the initialization order is:
    (Milestone 5);
 7. syscall observation state and dispatch policy (Milestone 6).
 
-Future milestones would add, in order, device abstraction and timer, scheduler,
-and executable loader. The coordinator in `kernel.c` calls
-`npk_process_boot()`, `npk_trap_init()`, `npk_memory_init()`,
-`npk_object_init()`, `npk_object_selftest()`, and `npk_syscall_init()` only.
-Syscall policy remains in `syscalls.c`; the trap C dispatcher only hands a
-system-call frame to `npk_syscall_dispatch()`.
+Future milestones would add, in order, scheduler and executable loader. The
+coordinator in `kernel.c` calls `npk_process_boot()`, `npk_trap_init()`,
+`npk_memory_init()`, `npk_object_init()`, `npk_object_selftest()`,
+`npk_device_init()`, and `npk_syscall_init()` only. Syscall policy remains in
+`syscalls.c`, device policy in `devices.c`; the trap C dispatcher publishes
+classification and hands system-call or interrupt frames to the appropriate
+backend.
 
 Each milestone may implement only the next coherent prefix of this order.
 
@@ -776,7 +817,7 @@ interpreter code is placed above the shadow to avoid self-overwrite.
 This harness validates the boot marker, exact step count, and a 64 KiB guest
 memory region against the Python reference boot. It is not native Nova support
 in QEMU, firmware, board support, RTL, physical-hardware validation, or an ISA
-change. It never changes the Nova64 ABI, syscall numbers, errors, or M1–M6
+change. It never changes the Nova64 ABI, syscall numbers, errors, or M1–M7
 behavior.
 
 ## 6. Kernel memory layout
@@ -819,6 +860,9 @@ addresses are identical. The initial layout is:
 | Syscall receipt log | `0x9FA90` | Eight 128-byte syscall receipts |
 | Syscall write log | `0x9FE90` | 256-byte bounded `SYS_WRITE` sink |
 | Syscall scratch | `0x9FF90` | 64-byte uncommitted `SYS_WRITE` copy buffer |
+| Device state | `0xA1000` | 144-byte M7 state block: magic, version, counters, last interrupt observations, timer interval |
+| Interrupt observation log | `0xA1090` | 16 × 32-byte bounded interrupt records |
+| Capability table | `0xA1290` | 8 × 32-byte support/rejection declarations |
 | Declared physical arena | `0xC0000`, `0x40000` bytes | Sparse-memory policy arena, not discovered RAM |
 | Unmapped/unused | elsewhere | No RAM bound is modeled by the emulator |
 
@@ -969,14 +1013,17 @@ the pre-trap privilege is not in the software trap frame.
 
 ## 11. Device architecture
 
-NPK separates generic interfaces from concrete backends:
+NPK separates generic interfaces from concrete backends. Milestone 7 implements
+this contract as follows:
 
-- console: generic write handle implemented initially over `SYS_WRITE`, which
-  the reference model records in `machine.io_log`;
-- timer: `time` and `timecmp` CSRs plus timer interrupts and `ie`/`ip`/`ivec`;
-- interrupt sources: software, timer, and external bits only; no interrupt
-  controller device exists;
-- block/input/network: no emulator device exists, so no driver is claimed.
+- console: the M6 `SYS_WRITE` commit path calls the M7 backend and leaves bytes
+  in the bounded write log; the host mirrors them to `machine.io_log`;
+- timer: `time` and `timecmp` CSRs plus timer interrupts and `ie`/`ip`/`ivec`,
+  accessed only through the small Nova assembly leaves in `devices.s`;
+- interrupt sources: software, timer, and external low `ecause` bits only; no
+  interrupt controller device exists;
+- block/input/network: no emulator device exists, so the capability table marks
+  them explicitly unsupported instead of claiming drivers.
 
 Any future MMIO serial, framebuffer, block, or input device requires an
 emulator device model and later physical hardware definition. It must not be

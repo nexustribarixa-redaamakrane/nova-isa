@@ -219,9 +219,10 @@ QEMU workaround. QEMU has no Nova target; the tool generates an x86-64 multiboot
 ELF that interprets the real `.nob` bytecode. The image is loaded into a
 1 MiB guest-physical shadow and Nova addresses are offset into it, while the
 interpreter itself is placed above the shadow. The validator compares the boot
-marker, exact step count (`246745`), and 64 KiB of guest memory against the
-Python reference boot.
+marker, exact step count, and 64 KiB of guest memory against the Python
+reference boot. The M6 image used `246745` steps; the current M7 image uses
+`254492`.
 
-This tooling validates the same processed M6 kernel as `boot_kernel()`; it is
+This tooling validates the same processed M1–M7 kernel as `boot_kernel()`; it is
 not native Nova execution in QEMU, firmware, board support, RTL, physical
 hardware validation, or an ISA change.

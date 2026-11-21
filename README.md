@@ -627,5 +627,8 @@ cmake --build build --target npk_qemu_boot
 because QEMU has no Nova target. The image is loaded into a shadow region and
 its guest memory is compared with the Python reference boot. This is a
 validation harness, not native Nova support in QEMU, firmware, RTL, or hardware
-evidence. See `docs/NPK_ARCHITECTURE.md` and `docs/PHASE2_PLAN.md` for the full
-contract and limitations.
+evidence. The kernel includes the Milestone 7 console/timer backend: interrupts
+are classified from the architectural `ecode`/`ecause` pair and serviced by
+`nova/npk/src/devices.c`; no MMIO device, device tree, interrupt controller, or
+physical hardware is claimed. See `docs/NPK_ARCHITECTURE.md` and
+`docs/PHASE2_PLAN.md` for the full contract and limitations.

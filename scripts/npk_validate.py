@@ -5,8 +5,8 @@ Run from the repository root::
     python scripts/npk_validate.py
 
 The script runs the NPK boot/build, processing-core, exception/trap, memory,
-object-manager, syscall-processing, and QEMU-harness tests first, then the
-unchanged Phase 1 regression suite. It exits 0 only when both stages pass.
+object-manager, syscall-processing, device/timer, and QEMU-harness tests first,
+then the unchanged Phase 1 regression suite. It exits 0 only when both stages pass.
 The QEMU boot itself is a separate optional target because QEMU is not required
 for host validation.
 """
@@ -34,6 +34,7 @@ STAGES = [
             "tests/test_npk_memory.py",
             "tests/test_npk_objects.py",
             "tests/test_npk_syscalls.py",
+            "tests/test_npk_devices.py",
             "tests/test_npk_qemu.py",
         ],
     ),

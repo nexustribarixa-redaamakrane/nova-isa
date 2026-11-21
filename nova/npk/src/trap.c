@@ -34,6 +34,14 @@
 
 #define NPK_OK 0
 
+#define NPK_ECODE_SYSTEM_CALL 7
+#define NPK_ECODE_INTERRUPT 8
+#define NPK_ECODE_SOFTWARE_TRAP 10
+
+#define NPK_SOURCE_SOFTWARE 0
+#define NPK_SOURCE_TIMER 1
+#define NPK_SOURCE_EXTERNAL 2
+
 #define NPK_CLASS_NONE 0
 #define NPK_CLASS_SYSTEM_CALL 1
 #define NPK_CLASS_SOFTWARE_TRAP 2
@@ -42,11 +50,15 @@
 #define NPK_CLASS_MEMORY_FAULT 5
 #define NPK_CLASS_MMU_FAULT 6
 #define NPK_CLASS_UNSUPPORTED 7
+#define NPK_CLASS_SOFTWARE_INTERRUPT 8
+#define NPK_CLASS_TIMER_INTERRUPT 9
+#define NPK_CLASS_EXTERNAL_INTERRUPT 10
 
 #define NPK_ACTION_NONE 0
 #define NPK_ACTION_RESUME_NEXT 1
 #define NPK_ACTION_REPORT_RESUME 2
 #define NPK_ACTION_UNSUPPORTED 3
+#define NPK_ACTION_SERVICE_INTERRUPT 4
 
 #define NPK_TRAP_RESULT_PROCESSED 0x54525058
 
@@ -92,12 +104,27 @@ static struct NpkTrapState *npk_state(void)
     return (struct NpkTrapState *)NPK_TRAP_STATE_ADDRESS;
 }
 
-static npk_u64 npk_trap_classification(npk_u64 ecode)
+static npk_u64 npk_trap_classification(npk_u64 ecode, npk_u64 ecause)
 {
-    if (ecode == 7) {
+    npk_u64 source;
+
+    if (ecode == NPK_ECODE_SYSTEM_CALL) {
         return NPK_CLASS_SYSTEM_CALL;
     }
-    if (ecode == 10) {
+    if (ecode == NPK_ECODE_INTERRUPT) {
+        source = ecause & 3;
+        if (source == NPK_SOURCE_SOFTWARE) {
+            return NPK_CLASS_SOFTWARE_INTERRUPT;
+        }
+        if (source == NPK_SOURCE_TIMER) {
+            return NPK_CLASS_TIMER_INTERRUPT;
+        }
+        if (source == NPK_SOURCE_EXTERNAL) {
+            return NPK_CLASS_EXTERNAL_INTERRUPT;
+        }
+        return NPK_CLASS_UNSUPPORTED;
+    }
+    if (ecode == NPK_ECODE_SOFTWARE_TRAP) {
         return NPK_CLASS_SOFTWARE_TRAP;
     }
     if (ecode == 1) {
@@ -117,6 +144,11 @@ static npk_u64 npk_trap_classification(npk_u64 ecode)
 
 static npk_u64 npk_trap_action(npk_u64 classification)
 {
+    if (classification == NPK_CLASS_SOFTWARE_INTERRUPT ||
+            classification == NPK_CLASS_TIMER_INTERRUPT ||
+            classification == NPK_CLASS_EXTERNAL_INTERRUPT) {
+        return NPK_ACTION_SERVICE_INTERRUPT;
+    }
     if (classification == NPK_CLASS_SYSTEM_CALL ||
             classification == NPK_CLASS_SOFTWARE_TRAP) {
         return NPK_ACTION_RESUME_NEXT;
@@ -169,13 +201,27 @@ npk_u64 npk_trap_execute(struct NpkOperation *op)
     struct NpkTrapFrame *frame = npk_frame();
     struct NpkTrapState *state = npk_state();
     npk_u64 classification;
+    int device_status = NPK_OK;
 
-    classification = npk_trap_classification(frame->ecode);
+    classification = npk_trap_classification(frame->ecode, frame->ecause);
     state->classification = classification;
     state->action = npk_trap_action(classification);
     if (classification == NPK_CLASS_UNSUPPORTED) {
         op->provisional = 0;
         return NPK_REASON_TRAP_UNSUPPORTED;
+    }
+    /* Milestone 7: an interrupt is serviced by the dedicated device backend,
+     * not by inline CSR handling in the trap dispatcher. The backend records
+     * bounded evidence and reprograms the one-shot timer compare. */
+    if (classification >= NPK_CLASS_SOFTWARE_INTERRUPT &&
+            classification <= NPK_CLASS_EXTERNAL_INTERRUPT) {
+        device_status = npk_device_interrupt(classification, frame->ecause,
+                                             frame->epc);
+        if (device_status != NPK_OK) {
+            state->action = NPK_ACTION_UNSUPPORTED;
+            op->provisional = 0;
+            return NPK_REASON_TRAP_UNSUPPORTED;
+        }
     }
     op->provisional = NPK_TRAP_RESULT_PROCESSED;
     return NPK_REASON_NONE;
@@ -218,8 +264,10 @@ int npk_trap_dispatch(struct NpkTrapFrame *frame)
     state->last_tval = frame->tval;
     /* Classification is a fact about the saved trap frame. Publish it before
      * core admission so Milestone 6 can still hand a SYSTEM_CALL to the syscall
-     * service if the trap receipt log is already bounded and full. */
-    state->classification = npk_trap_classification(frame->ecode);
+     * service if the trap receipt log is already bounded and full. Interrupt
+     * classification uses ecode 8 plus the low ecause source bits, never an
+     * invented interrupt controller or MMIO device. */
+    state->classification = npk_trap_classification(frame->ecode, frame->ecause);
     state->action = npk_trap_action(state->classification);
     state->result = 0;
     state->receipt_index = NPK_NO_INDEX;
