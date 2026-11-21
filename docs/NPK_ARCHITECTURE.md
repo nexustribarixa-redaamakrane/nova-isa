@@ -1,8 +1,9 @@
 # NPK — Nova Processed Kernel architecture
 
 **Status:** authoritative Phase 2 architecture baseline; Milestone 2 processing
-core, Milestone 3 exception/trap subsystem, Milestone 4 memory subsystem, and
-Milestone 5 Object Manager implemented.
+core, Milestone 3 exception/trap subsystem, Milestone 4 memory subsystem,
+Milestone 5 Object Manager, and Milestone 6 syscall and privilege-context
+processing implemented.
 
 **Kernel:** NPK — Nova Processed Kernel.  
 **Classification:** Winoid.  
@@ -98,7 +99,7 @@ or claimed here.
 
 | Component | Responsibility | Status |
 | --- | --- | --- |
-| Operation producers | Create typed work from boot/trap/memory/object/syscall/device/loader events | Boot, trap, post-boot memory, and post-boot object producers implemented; syscall/device/loader producers remain future work |
+| Operation producers | Create typed work from boot/trap/memory/object/syscall/device/loader events | Boot, trap, post-boot memory, post-boot object, and syscall producers implemented; device/loader producers remain future work |
 | `NpkOperation` | Carries operation code, input, stage cursor, provisional result, result, reason, receipt index, and typed evidence | Generalized typed records in Milestone 2; trap type added in Milestone 3; memory fields added in Milestone 4; stable object identity/handle/namespace fields added in Milestone 5 |
 | Processing units `PU0`/`PU1` | Own one operation each and drive stage advancement | Two sequential units in Milestone 2; memory and object operations use the same ownership model |
 | Stage handlers | Implement validate/execute/commit invariants per operation type | Boot, diagnostic, trap, five memory, and twelve object operation types implemented |
@@ -350,16 +351,18 @@ Trap classification is by `ecode`:
 
 | `ecode` | Class | Action |
 | ---: | --- | --- |
-| `7` (`SYSTEM_CALL`) | system call | classify for the planned Milestone 6 dispatcher; resume after the call |
+| `7` (`SYSTEM_CALL`) | system call | classify, service through the Milestone 6 syscall subsystem, and resume after the call |
 | `10` (`SOFTWARE_TRAP`) | software trap | resume after the trap instruction |
 | `1` (`ILLEGAL_INSTRUCTION`), `3` (`MEMORY_FAULT`), `4` (`ALIGNMENT_FAULT`), `9` (`MMU_FAULT`) | fault | report and resume at the faulting PC |
 | other assigned codes | unsupported | fail the operation and report; do not claim a service |
 | `0` or unknown | invalid | reject the operation before publication |
 
-`SYSTEM_CALL` is only classified in Milestone 3. No syscall number is serviced,
-no `a0`/`a1` result is written, and no object-manager semantics are introduced.
-Codes `2`, `5`, `6`, `8`, and `11` are recognized as assigned but unsupported by
-this milestone and produce a distinct `FAILED` receipt.
+Milestone 3 introduced the classification and frame contract. Milestone 6 now
+services `SYSTEM_CALL` through a separate syscall operation without changing that
+classification: `a0`/`a1` results are written into the saved frame before `MRET`,
+and supported object numbers reach the Milestone 5 manager. Codes `2`, `5`, `6`,
+`8`, and `11` remain recognized as assigned but unsupported exception classes and
+produce a distinct `FAILED` trap receipt.
 
 The dispatcher allocates an `NPK_OP_TRAP_PROCESS` operation through the ordinary
 admission interface and advances it through `ADMIT → VALIDATE → EXECUTE → COMMIT →
@@ -441,9 +444,9 @@ The Winoid principle "everything is an object" is implemented as a common
 contract for kernel-managed resources, not as one allocation per variable,
 register, instruction, or byte. Milestone 4 supplies the memory payloads and
 address spaces that M5 can wrap; M5 supplies stable identity, type, ownership,
-handles, references, access checks, namespace membership, and lifetime. Syscalls
-may expose these operations in a later milestone, but every object operation
-already enters the NPK pipeline rather than bypassing it.
+handles, references, access checks, namespace membership, and lifetime. Milestone
+6 exposes selected object operations through syscalls, but every object
+operation still enters the NPK pipeline rather than bypassing it.
 
 The fixed object state uses magic `0x4E504B4F` and version `5`. Object ids begin
 at `0x4E504B4F00000000` and increase monotonically. Each 128-byte object slot
@@ -507,13 +510,66 @@ M1–M4 receipt words remain unchanged; the extension is a parallel observation
 record, not an ABI. `kernel.c` only calls object initialization and self-test;
 object policy remains in `objects.c`.
 
-The reserved syscalls `SYS_OBJ_CREATE = 4`, `SYS_OBJ_SIZE = 5`, and
-`SYS_OBJ_DESTROY = 6` are unchanged and inert. There is no syscall dispatcher,
-process object, device object, file object, scheduler, user executable loader,
-symbol table, ACL/token security model, quota system, or physical-hardware
-claim. Commit is not transactional; no rollback, isolation, or durability is
-claimed. Processing units remain sequential and no synchronization model is
-claimed.
+The syscall numbers `SYS_OBJ_CREATE = 4`, `SYS_OBJ_SIZE = 5`, and
+`SYS_OBJ_DESTROY = 6` are unchanged. Milestone 6 maps them to real M5 `CREATE`,
+`QUERY`, `CLOSE`+`DESTROY`, and handle/payload services; see the syscall section
+below. There is no process object, device object, file object, scheduler, user
+executable loader, symbol table, ACL/token security model, quota system, or
+physical-hardware claim. Commit is not transactional; no rollback, isolation, or
+durability is claimed. Processing units remain sequential and no synchronization
+model is claimed.
+
+### Milestone 6 syscall and privilege-context processing
+
+Milestone 6 adds a real syscall service in `nova/npk/src/syscalls.c`. `SCALL imm`
+continues to enter through the Milestone 3 vector; `npk_trap_dispatch()` classifies
+`ecode == 7`, records the trap receipt as before, and hands the frame to
+`npk_syscall_dispatch()`. The syscall number is `frame->ecause`; arguments are
+`saved frame GPRs a0..a5` (`gpr[1]..gpr[6]`). The kernel never calls the Phase 1
+host helper `nova.syscalls.dispatch_syscall()`.
+
+Each call admits one new typed operation, type `21`, into the shared core with a
+fixed id derived from the syscall dispatch count. The operation traverses
+`ADMIT → VALIDATE → EXECUTE → COMMIT → COMPLETE`; malformed or unauthorized calls
+are `REJECTED`, while execution, child-operation, or commit faults are `FAILED`.
+Reasons `46..56` identify frame/state/number/argument/privilege/pointer/
+unsupported/resource/not-found/commit/child failures. A dedicated eight-slot
+receipt log at `0x9FA90` records syscall operations without touching the M1–M5
+logs; `npk_core_admit()` refuses to overwrite it when full.
+
+Validation checks the trap frame, `ecode`, aligned `epc`, syscall initialization,
+machine-mode handler context, syscall number and argument count, buffer capacity,
+canonical user addresses, explicit user/read PTE bits through the active M4
+address space, and fixed object handles/ownership. `SYS_READ` remains
+`UNSUPPORTED` because no input device exists. `SYS_EXIT` and `SYS_YIELD` only set
+observation flags; no process is terminated or scheduled. `SYS_TIME` reads the
+live `time` CSR through a small `r7`-returning assembly leaf, because the C
+compiler's return register is `r7` while the user-visible syscall return is `a0`
+(`r1`).
+
+`SYS_WRITE` copies at most 64 bytes into a bounded scratch buffer during
+execution and publishes them to a 256-byte write log only at commit. Invalid
+ranges are rejected before execution; capacity exhaustion at either stage is a
+distinct failure with `ERR_NO_RESOURCE`. `SYS_OBJ_CREATE`, `SYS_OBJ_SIZE`, and
+`SYS_OBJ_DESTROY` build existing M5 request blocks and call
+`npk_object_syscall_request()`, producing real child M5 operations and receipts.
+No object-manager logic is duplicated.
+
+The frozen ABI is preserved: success writes the result to the saved frame's
+`gpr[1]` and zero to `gpr[2]` (`a1`); failure writes the all-ones architectural
+`-1` to `gpr[1]` and one of errors `1..4` to `gpr[2]`. Publication happens only
+at commit or at a terminal failure, before the assembly trap entry restores GPRs
+and executes `MRET`. The `SCALL` stub then resumes at `PC + 4` in user mode. The
+host helper `npk.call_syscall()` only builds that stub and decodes observable
+state; it is not a guest API.
+
+The subsystem records a `handler_priv` value, but Nova v1.0 exposes only the
+machine-mode handler privilege in the software frame. The pre-trap caller
+privilege exists only on the emulator's internal save stack and is not visible
+to guest kernel software. Consequently M6 validates the handler context but does
+**not** claim caller-privilege enforcement, process ownership, or a user/kernel
+address-space split. M6 also adds no device, timer, scheduler, loader, or new
+syscall number.
 
 ### Object Manager Design: OpenWindows and WRK Comparison
 
@@ -599,8 +655,9 @@ Important platform facts that shape NPK:
    `psr`, and no `tval`.
 3. All synchronous traps and interrupts enter machine privilege. There is no
    supervisor trap delegation and no `SRET`/`ERET` instruction.
-4. There is no boot firmware, device tree, MMIO device, or kernel syscall hook
-   inside `NovaMachine`. A host harness dispatches reference syscalls today.
+4. There is no boot firmware, device tree, MMIO device, or architectural kernel
+   syscall hook inside `NovaMachine`. NPK installs a software `SCALL` trap path;
+   the separate host reference dispatcher used by Phase 1 is not that path.
 5. There is no RAM-size limit or frame allocator. Memory is a sparse map of
    host backing pages.
 6. There is no ASID, TLB shootdown, or supervisor delegation.
@@ -675,8 +732,9 @@ any C function.
    and initializes the trap observation state;
 5. executes `HALT` with `npk_main`'s return value in `a0`.
 
-`HALT` is the Phase 2 termination mechanism. `SYS_EXIT` remains an ABI syscall
-for future user processes, but there is no kernel dispatcher yet.
+`HALT` is the Phase 2 termination mechanism. `SYS_EXIT` is now serviced by the
+Milestone 6 kernel syscall subsystem as a recorded policy request; NPK has no
+task or scheduler, so it does not terminate a process or change machine state.
 
 ### 5.4 Initialization order
 
@@ -688,12 +746,15 @@ The implemented prefix of the initialization order is:
 4. exception/trap observation state (Milestone 3);
 5. memory-manager state and published request entry (Milestone 4);
 6. object-manager state, type registry, namespace, and published request entry
-   (Milestone 5).
+   (Milestone 5);
+7. syscall observation state and dispatch policy (Milestone 6).
 
-Future milestones would add, in order, a syscall dispatcher, device abstraction
-and timer, scheduler, and executable loader. The coordinator in `kernel.c`
-calls `npk_process_boot()`, `npk_trap_init()`, `npk_memory_init()`,
-`npk_object_init()`, and `npk_object_selftest()` only.
+Future milestones would add, in order, device abstraction and timer, scheduler,
+and executable loader. The coordinator in `kernel.c` calls
+`npk_process_boot()`, `npk_trap_init()`, `npk_memory_init()`,
+`npk_object_init()`, `npk_object_selftest()`, and `npk_syscall_init()` only.
+Syscall policy remains in `syscalls.c`; the trap C dispatcher only hands a
+system-call frame to `npk_syscall_dispatch()`.
 
 Each milestone may implement only the next coherent prefix of this order.
 
@@ -733,6 +794,10 @@ addresses are identical. The initial layout is:
 | Namespace entries | `0x9E390` | 16 × 96-byte directory entries |
 | Namespace state | `0x9E990` | 128-byte namespace observations |
 | Object receipt extensions | `0x9EA10` | 128 × 32-byte object evidence records |
+| Syscall state | `0x9FA10` | 128-byte syscall dispatch observations |
+| Syscall receipt log | `0x9FA90` | Eight 128-byte syscall receipts |
+| Syscall write log | `0x9FE90` | 256-byte bounded `SYS_WRITE` sink |
+| Syscall scratch | `0x9FF90` | 64-byte uncommitted `SYS_WRITE` copy buffer |
 | Declared physical arena | `0xC0000`, `0x40000` bytes | Sparse-memory policy arena, not discovered RAM |
 | Unmapped/unused | elsewhere | No RAM bound is modeled by the emulator |
 
@@ -769,6 +834,13 @@ Privilege transitions available to NPK:
 - `CSRW priv`: machine software may explicitly change current privilege;
 - VM transitions: reserved for a later, separate hypervisor feature.
 
+Milestone 6 can validate that the handler is machine mode, but the software trap
+frame does not expose the pre-trap caller privilege. It is therefore incorrect to
+describe the syscall subsystem as enforcing caller privilege. No process,
+scheduler, or trusted call gate exists; object calls use a fixed kernel-owned
+observation owner, and M4 user pointers are checked against explicit `U` PTEs
+rather than a process address space.
+
 ## 8. Exception architecture
 
 ### 8.1 Hardware entry
@@ -798,12 +870,16 @@ does not implement a deeper software stack.
 
 Milestone 3 dispatch classifies by `ecode` and processes every class as an
 `NPK_OP_TRAP_PROCESS` operation through the full processing-core lifecycle.
-`SYSTEM_CALL` is classified for the planned Milestone 6 dispatcher but is not
-serviced. Faults report their class and resume at the saved `epc`; software
+For `SYSTEM_CALL`, Milestone 6 additionally hands the saved frame to the syscall
+service, which admits a separate type-21 operation and owns the `a0`/`a1` result
+contract. Classification is published before M3 admission, so a valid system
+call still reaches the syscall service when the M3 trap receipt log is full; a
+trap operation that rejects or fails the frame is not handed off. Faults report
+their class and resume at the saved `epc`; software
 traps and system calls resume at `epc`, which the platform sets to `PC + 4`.
 Unknown or zero `ecode` values are rejected; assigned but unsupported classes
-are failed. No result is published before `COMMIT`, and `MRET` occurs only after
-the operation reaches a terminal state.
+are failed. No syscall result is published before `COMMIT`, and `MRET` occurs
+only after the operation reaches a terminal state.
 
 `MRET` returns to `epc`, restores the saved privilege from the platform stack,
 and clears `ecode`; `ecause` is not restored, so guest software must not assume
@@ -847,26 +923,28 @@ construction, memory protection keys, copy-on-write, or transactional rollback.
 
 ## 10. System-call architecture
 
-The syscall ABI stays unchanged: numbers `0..7`, arguments in `a0`-`a5`,
-return in `a0`, error `-1` in `a0` with an error code in `a1`, and the call
-number delivered as `ecause` on `SYSTEM_CALL`.
+The syscall ABI stays unchanged: numbers `0..7`, arguments in `a0`-`a5`, return
+in `a0`, error `-1` in `a0` with an error code in `a1`, and the call number
+delivered as `ecause` on `SYSTEM_CALL`.
 
-The future in-kernel dispatcher will:
+The in-kernel syscall service now:
 
-1. verify `0 <= ecause <= 7`;
-2. verify argument count and ranges;
-3. validate user pointers against the active address space and permissions;
-4. execute the operation;
-5. convert failures to the existing error convention;
-6. return through the software trap frame and `MRET`.
+1. verifies `0 <= ecause <= 7` and the expected argument count;
+2. validates the saved trap frame, machine-mode handler context, and buffer
+   capacity;
+3. validates user pointers against explicit user/read PTEs in the active M4
+   address space;
+4. resolves object handles and access requirements through M5 state;
+5. admits a type-21 operation and drives all five processing stages;
+6. converts terminal failures to errors `1..4` and publishes `a0`/`a1` into the
+   saved frame before `MRET`.
 
-Milestone 3 installs the trap path that will later deliver `SYSTEM_CALL`, but it
-does not implement the dispatcher: no syscall number is serviced by the kernel
-and no `a0`/`a1` result is written.
-
-The host-side `nova.syscalls.dispatch_syscall()` remains the reference-model
-helper used by Phase 1 tests. It is not an NPK kernel feature and it currently
-reads buffers directly rather than through translation.
+Calls `0`, `3`, and `7` are serviced locally as policy observations; `2` remains
+unsupported; `1` uses the bounded write sink; and `4`–`6` are translated to real
+M5 object operations. The host-side `nova.syscalls.dispatch_syscall()` remains
+the reference-model helper used by Phase 1 tests. It is not the NPK kernel path
+and is not called from `syscalls.c`. No caller-privilege claim is made because
+the pre-trap privilege is not in the software trap frame.
 
 ## 11. Device architecture
 
@@ -923,7 +1001,8 @@ with no implemented format.
 
 NPK uses existing reference-model observability:
 
-- `machine.io_log` for write syscalls;
+- `machine.io_log` for Phase 1 reference write calls and the NPK syscall write
+  log at `0x9FE90` for Phase 2 kernel syscalls;
 - `machine.irq_log` and `machine.ipi_log` for interrupt/IPI evidence;
 - `machine.exception_stack()` for host-side platform save-stack inspection;
 - `nova.npk.traps` for decoding the kernel-written software frame, trap state,

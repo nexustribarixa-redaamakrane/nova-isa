@@ -23,7 +23,7 @@ finished. No future milestone is marked complete early.
 | 3 | Exception and trap subsystem | COMPLETE | Register-preserving trap frame and `MRET` return test |
 | 4 | Physical and virtual memory management | COMPLETE | Allocation, mapping, permissions, faults, and address-space isolation tested |
 | 5 | Object Manager and Universal Object Model | COMPLETE | Typed object identity, handles, references, namespaces, access policy, destruction, and receipts tested |
-| 6 | Syscall and privilege subsystem | NOT STARTED | In-kernel ABI dispatch with validation and error conversion tested |
+| 6 | Syscall and privilege subsystem | COMPLETE | In-kernel ABI dispatch with validation and error conversion tested |
 | 7 | Device abstraction and timer integration | NOT STARTED | Console/timer interfaces tested without invented devices |
 | 8 | Task management and cooperative scheduling | NOT STARTED | Deterministic task creation, yield, and switch tested |
 | 9 | Executable loading and user execution | NOT STARTED | `.nob` user image loads, runs, and terminates under NPK |
@@ -520,8 +520,9 @@ scheduler, syscall dispatcher, user process, or loader. No synchronization is
 claimed: the core's processing units remain sequential and non-preemptive.
 Commit is not transactional; there is no rollback, journal, isolation, or
 durability. Namespace paths are flat component chains over a fixed table, not
-a general filesystem. Reserved syscall numbers `4`, `5`, and `6` remain
-unchanged and inert. This is not physical-hardware support.
+a general filesystem. At Milestone 5 completion, reserved syscall numbers `4`,
+`5`, and `6` remained unchanged and inert; Milestone 6 now maps them to these M5
+operations without renumbering them. This is not physical-hardware support.
 
 **Validation result.**
 
@@ -546,30 +547,82 @@ documentation, and scoped commits complete; all validation commands green;
 
 ## Milestone 6 — Syscall and privilege subsystem
 
-**Objective.** Implement the in-kernel syscall dispatcher while preserving Nova
-syscall ABI v1.0.
+**Status:** COMPLETE.
+
+**Objective.** Expose existing M5 object-manager functionality through the frozen
+Nova syscall ABI using a real, separately processed NPK syscall subsystem.
 
 **Dependencies.** Milestones 1–5.
 
-**Files likely to change.** `nova/npk/syscalls.py`, kernel dispatch code,
-`tests/test_npk_syscalls.py`, `docs/NPK_ARCHITECTURE.md`.
+**Files changed.**
+
+- `nova/npk/src/syscalls.c`, `nova/npk/src/syscalls.s`: syscall admission,
+  validation, execution, commit, error conversion, and the C-ABI time helper.
+- `nova/npk/src/trap.c`, `nova/npk/src/kernel.c`: `SCALL` handoff and
+  coordinator-only syscall initialization.
+- `nova/npk/src/processing.c`, `nova/npk/src/npk_core.h`: type `21`, reasons
+  `46..56`, dedicated receipt routing, syscall operation arguments, and child
+  receipt publication.
+- `nova/npk/src/memory.c`, `nova/npk/src/objects.c`: read-only user-pointer walk
+  over M4 page tables and a typed bridge to real M5 object requests.
+- `nova/npk/layout.py`, `nova/npk/core.py`, `nova/npk/syscalls.py`,
+  `nova/npk/__init__.py`: fixed M6 layout, constants, state/receipt decoders,
+  ABI expectations, and the real `SCALL` harness helper.
+- `nova/npk/build.py`: compiles and links the two new syscall objects.
+- `tests/test_npk_syscalls.py`, `scripts/npk_validate.py`: real-machine syscall
+  tests and repeatable validation.
+- `tests/test_npk_exceptions.py`, `tests/test_npk_memory.py`: preserve the
+  original M3/M4 intent while accounting for published syscall results.
+- `docs/NPK_ARCHITECTURE.md`, `docs/PHASE2_PLAN.md`,
+  `docs/NPK_MILESTONE6_RECONNAISSANCE.md`, `docs/NPK_MILESTONE6_REPORT.md`.
 
 **Implementation scope.**
 
-- Preserve numbers `0..7`, argument registers, return conventions, and errors.
-- Validate syscall number, argument count, and user pointers.
-- Implement `SYS_EXIT`, `SYS_WRITE`, `SYS_TIME`, `SYS_YIELD`, and object calls
-  according to kernel policy; `SYS_READ` remains unsupported until an input
-  device exists.
-- Machine/user boundary tests using paged user mappings.
+- `SCALL imm` continues through the real M3 trap entry. The C trap dispatcher
+  records its trap operation and hands the frame to the syscall subsystem;
+  `frame->ecause` is the syscall number and `gpr[1]..gpr[6]` are `a0..a5`.
+- Every call admits a type-21 operation into the shared core and traverses
+  `ADMIT → VALIDATE → EXECUTE → COMMIT → COMPLETE`. Malformed calls are
+  `REJECTED`; execution, child, and commit faults are `FAILED`.
+- A dedicated eight-slot syscall receipt log at `0x9FA90` never overwrites a
+  record silently. M1–M5 receipts, counters, and layout are unchanged.
+- Validation covers the frame, initialization, handler context, number and
+  argument count, write capacity, canonical user addresses with explicit `U`
+  and read PTE bits, object handles, ownership, and access requirements.
+- `SYS_EXIT` and `SYS_YIELD` set observation flags only. `SYS_TIME` reads the
+  live CSR; `SYS_READ` reports `UNSUPPORTED`.
+- `SYS_WRITE` stages at most 64 bytes in a scratch buffer and publishes to a
+  256-byte bounded log only at commit.
+- Object syscalls translate into M5 `OP_OBJECT_CREATE`, `OP_OBJECT_QUERY`,
+  `OP_OBJECT_CLOSE`, and `OP_OBJECT_DESTROY` requests and preserve child receipt
+  evidence. No object logic is reimplemented.
+- Success writes the result to saved `gpr[1]` and zero to `gpr[2]`; failure
+  writes all-ones and error `1..4`. Publication occurs before the assembly
+  trap entry restores GPRs and executes `MRET`.
 
-**Tests.** Number validation, bad arguments, invalid user pointers, success and
-error paths, ABI compatibility with `nova.syscalls.SYSCALL_TABLE`.
+**Tests.**
 
-**Acceptance criteria.** The syscall table is byte-for-byte number-compatible;
-invalid input cannot read or write kernel memory.
+- Initialization, frozen ABI constants, real `SCALL` framing, `a0`/`a1`
+  publication, invalid numbers and arguments, and dedicated receipt routing.
+- Success and failure paths for `SYS_EXIT`, `SYS_YIELD`, `SYS_TIME`,
+  `SYS_WRITE`, `SYS_READ`, and object create/size/destroy.
+- Mapped, unmapped, non-user, non-readable, overflowing, and out-of-range user
+  pointers with no kernel write on rejection.
+- Bounded write/scratch logs, child M5 receipt indexes, preserved M1–M5
+  evidence, and unchanged Phase 1 host dispatcher behavior.
 
-**Known limitations.** No hosted libc, no dynamic linking, no `FILE` streams.
+**Acceptance criteria.** Every syscall traverses the shared five-stage lifecycle
+or an explicit terminal path with a specific reason and receipt. Return values
+and errors are observable in restored `a0`/`a1`, invalid user pointers cannot
+read or write kernel memory, and Nova ISA v1.0, the Nova64 ABI, Phase 1, and
+M1–M5 behavior are unchanged.
+
+**Known limitations.** Nova v1.0 does not expose the pre-trap caller privilege
+inside the software trap frame; `handler_priv` is always machine mode, so caller
+privilege is not enforced. There is no hosted libc, dynamic linking, `FILE`
+stream, process, scheduler, input device, or executable loader. Object calls use
+one fixed kernel-owned observation owner. Commit is not transactional, and no
+caller/kernel address-space split or hardware device support is claimed.
 
 **Completion conditions.** Dispatch contract documented, tests green,
 regression green, committed.
