@@ -638,7 +638,7 @@ def test_bad_magic_and_unknown_operation_do_not_admit(image):
 
 def test_m3_trap_processing_still_works_after_memory_init(image):
     machine = fresh_machine(image)
-    machine.load_code(assemble_text("SCALL 5\nHALT\n"), CODE_ADDRESS)
+    machine.load_code(assemble_text("TRAP 5\nHALT\n"), CODE_ADDRESS)
     machine.pc = CODE_ADDRESS
     machine.priv = USER
     machine.halted = False
@@ -653,7 +653,7 @@ def test_m3_trap_processing_still_works_after_memory_init(image):
     state = npk.decode_trap_state(machine)
     npk.validate_trap_state(state)
     assert state.dispatch_count == 1
-    assert state.classification == npk.CLASS_SYSTEM_CALL
+    assert state.classification == npk.CLASS_SOFTWARE_TRAP
     assert state.action == npk.ACTION_RESUME_NEXT
     receipt = npk.decode_trap_receipts(machine)[0]
     assert receipt.type == npk.OP_TRAP_PROCESS

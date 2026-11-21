@@ -200,6 +200,7 @@ def test_system_call_frame_captures_every_gpr_and_exception_state(image):
     install_code(machine, "SCALL 5\nHALT\n")
     values = register_pattern()
     set_registers(machine, values)
+    machine.write_register(1, 0)
     machine.psr = PSR_FLAGS
     write_privileged_csr(machine, TVAL, TVAL_SENTINEL)
 
@@ -207,7 +208,14 @@ def test_system_call_frame_captures_every_gpr_and_exception_state(image):
 
     frame = traps.decode_trap_frame(machine)
     traps.validate_trap_frame(frame)
-    assert frame.gpr == (0, *[values[i] for i in range(1, 32)])
+    # M6 publishes a0/a1 into the saved frame before MRET. Every other GPR is
+    # still the exact interrupted register captured by the M3 vector.
+    assert frame.gpr == (
+        0, WORD_MASK, npk.ERR_NOT_FOUND,
+        *[values[i] for i in range(3, 32)]
+    )
+    assert machine.read_register("a0") == WORD_MASK
+    assert machine.read_register("a1") == npk.ERR_NOT_FOUND
     assert frame.psr == PSR_FLAGS
     assert frame.epc == CODE_ADDRESS + 4
     assert frame.ecause == 5
@@ -235,8 +243,11 @@ def test_mret_restores_registers_csrs_privilege_and_exact_pc(image):
 
     run_trap(machine, CODE_ADDRESS + 4)
 
+    # An invalid syscall number is rejected, so MRET restores the published
+    # -1/ERR_UNSUPPORTED in a0/a1 and the original value in every other GPR.
     assert [machine.read_register(i) for i in range(32)] == [
-        0, *[values[i] for i in range(1, 32)]
+        0, WORD_MASK, npk.ERR_UNSUPPORTED,
+        *[values[i] for i in range(3, 32)]
     ]
     assert machine.psr == PSR_FLAGS
     assert read_privileged_csr(machine, TVAL) == TVAL_SENTINEL
@@ -478,7 +489,9 @@ def test_trap_receipt_is_validated_independently_of_kernel_status(image):
 def test_trap_dispatch_does_not_disturb_m1_or_m2_receipt_evidence(image):
     result = boot_fresh(image)
     machine = result.machine
-    install_code(machine, "SCALL 4\nHALT\n")
+    # Use a non-syscall trap so the assertion remains about M3 trap dispatch;
+    # syscall operations legitimately add their own receipts and core counters.
+    install_code(machine, "TRAP 4\nHALT\n")
 
     run_trap(machine, CODE_ADDRESS + 4)
 
