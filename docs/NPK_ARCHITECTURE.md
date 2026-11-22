@@ -3,7 +3,7 @@
 **Status:** authoritative Phase 2 architecture baseline; Milestone 2 processing
 core, Milestone 3 exception/trap subsystem, Milestone 4 memory subsystem,
 Milestone 5 Object Manager, Milestone 6 syscall and privilege-context processing,
-and Milestone 7 device/timer integration implemented.
+and Milestone 7 expanded typed device/timer processing implemented.
 
 **Kernel:** NPK — Nova Processed Kernel.  
 **Classification:** Winoid.  
@@ -578,38 +578,111 @@ syscall number.
 
 Milestone 7 adds `nova/npk/src/devices.c` and `nova/npk/src/devices.s` without
 moving device policy into `kernel.c`, `trap.c`, or `syscalls.c`. The coordinator
-calls `npk_device_init()`; the syscall commit path calls
+calls `npk_device_init()` once; the syscall commit path calls
 `npk_device_console_commit()`; the trap execute path calls
-`npk_device_interrupt()`. No new operation type or syscall number is introduced.
+`npk_device_interrupt()`. `kernel.c` neither registers devices nor resets M7
+state after initialization. No ISA instruction, encoding, CSR, trap code, syscall
+number, or error code is changed.
+
+#### Typed device and timer processing
+
+The published observation word at `0xA0F00` holds the address of a bounded
+104-byte request; boot does not admit an operation through it. Guest callers
+publish a request with magic, operation id, operation code `22..30`, target
+(device or timer id), owner, optional object handle, kind, capability, and four
+argument words. The kernel replies through a bounded 80-byte response with
+status, reason, architectural error, result, evidence, slot, and receipt index.
+The request/response API is a kernel observation contract, not a new Nova ABI.
+
+Every accepted request is admitted into the same Milestone 2 operation slots and
+processing units used by earlier milestones. The five stages remain distinct:
+`ADMIT` checks operation type, target, capacity, processing-unit availability,
+and receipt slot; `VALIDATE` checks request identity, owner/object association,
+registry or timer existence, registration state, operational state, capability,
+and typed parameters; `EXECUTE` runs the real kernel backend and records a
+provisional result without publishing state; `COMMIT` publishes the bounded
+registry/timer/log state and receipt; `COMPLETE` releases the processing unit.
+Rejection, backend failure, and completion remain distinguishable. A success is
+never reported without execution and commit, and unsupported kinds or backends
+return explicit unsupported results.
+
+The device registry has eight bounded 64-byte records. Each record carries a
+unique nonzero id, kind, capability, owner, object association, state, operation
+count, and last result. Registration and unregistration are lifecycle
+operations, not direct registry writes; duplicate ids, unsupported kinds,
+capability mismatches, owner/object mismatches, and registry exhaustion are
+rejected without mutating the registry. Multiple devices of a supported kind are
+permitted. Console and timer are supported; block, input, and network are
+declared unsupported. Device write validation uses the Milestone 4 user-physical
+translation for the caller buffer, copies bytes into bounded kernel scratch in
+`EXECUTE`, and appends them to the Milestone 6 write log in `COMMIT`. No caller
+pointer is dereferenced unchecked, and no DMA is claimed.
+
+The timer table has eight bounded 64-byte records with explicit `PENDING`,
+`EXPIRED`, `DELIVERED`, and `CANCELLED` states. Creation records the current
+emulator `time` and requested interval, then computes a real `time + interval`
+deadline. Expiration chooses the earliest due deadline, breaking ties by lowest
+timer id, writes a bounded event record, and marks the timer expired. Cancellation
+is accepted only from `PENDING`; expiration and delivery are terminal and do not
+create duplicate events. A separate eight-entry event log and event-id sequence
+make delivery observable. Timer create/cancel/inspect/expire/deliver all carry
+typed receipts. Timer events and receipts are bounded; exhaustion is rejected
+and never overwrites earlier evidence.
+
+Device and timer receipts live in separate 32-entry tables at `0xA1A00` and
+`0xA2A00`, distinct from the M2/M3/M4/M5/M6 logs. Each receipt includes the
+operation id, operation type, processing unit, final stage, state, outcome,
+result/error, reason, complete stage trace, and device/timer evidence. Dedicated
+device/timer operation counters record completed work without changing earlier
+core counters.
+
+#### Console, clock sources, and interrupts
 
 The console backend does not invent a serial device. `SYS_WRITE` continues to
 stage bytes in the M6 scratch buffer and commit them to the M6 write log; the
 device backend owns that commit and counts calls/bytes. The host-side
 `devices.publish_console()` helper mirrors those bytes into the reference
-machine's `machine.io_log`. Nova itself has no I/O instruction, and NPK never
-calls the Phase 1 host syscall dispatcher.
+machine's `machine.io_log`. Nova has no I/O instruction, and NPK never calls the
+Phase 1 host syscall dispatcher.
 
-Timer and interrupt support uses only the architectural CSRs `time`, `timecmp`,
-`ie`, `ip`, and `ivec`. The assembly leaves in `devices.s` return values in `r7`
-(the `nova-cc` C return register) and mirror reads into `a0`. On `ecode == 8`,
-`trap.c` classifies the low `ecause` source bits as software (`0`), timer (`1`),
-or external (`2`) and invokes the device backend. The backend records bounded
+The clock-source audit is deliberately explicit:
+
+| Clock or event source | Status in M7 | What NPK actually does |
+| --- | --- | --- |
+| Host reference clock | Host test/validation only | Used by the Python harness and QEMU runner to measure execution; never read by guest kernel code and never a timer source |
+| Emulator cycle counter | Real `NovaMachine` CSR | `time` is read by the kernel to compute software timer deadlines and by the trap backend to record interrupt evidence |
+| Software logical clock | Implemented | Bounded timer records and event ids order software timer events deterministically; this is kernel RAM state, not a hardware timer |
+| Future hardware timer | Not present | `timecmp` is an architectural one-shot CSR, but there is no hardware timer device, timer MMIO, or device tree |
+| Real hardware interrupt | Not present | `ip`, `ie`, and `ivec` are architectural CSRs; host-injected software/timer/external interrupts exercise the real M3 vector but are not physical interrupts |
+
+The assembly leaves in `devices.s` return values in `r7` (the `nova-cc` C return
+register) and mirror reads into `a0`. On `ecode == 8`, `trap.c` classifies the low
+`ecause` source bits as software (`0`), timer (`1`), or external (`2`) and invokes
+`npk_device_interrupt()` from the device backend. The backend records bounded
 evidence and, for a timer interrupt, writes a new aligned one-shot `timecmp`.
 The interval is large enough for the unoptimized C trap path to finish before a
 new compare can fire. The emulator clears the delivered `ip` bit and appends the
-source to `irq_log`; NPK does not model an interrupt controller.
+source to `irq_log`. The M3 frame and exception receipts remain intact. Software
+timer events delivered through the typed timer API are software events; they do
+not set `ip`, inject an interrupt, wake a task, or imply a scheduler.
 
-The M7 observation layout is bounded and disjoint from M1–M6 evidence: state at
+#### Observation layout and limits
+
+The M7 layout is bounded and disjoint from M1–M6 evidence: device state at
 `0xA1000` (144 bytes), interrupt log at `0xA1090` (16 × 32 bytes), capability
-table at `0xA1290` (8 × 32 bytes), and a layout limit of `0xB0000`. The
-capability table marks console and timer supported and block, input, and network
-explicitly unsupported. Host decoders in `nova/npk/devices.py` validate this
+table at `0xA1290` (8 × 32 bytes), request entry at `0xA0F00`, request block at
+`0xA1390`, response at `0xA1400`, operation state at `0xA1450`, registry at
+`0xA14E0`, timer table at `0xA16E0`, event log at `0xA18E0`, device receipts at
+`0xA1A00`, timer receipts at `0xA2A00`, scratch at `0xA3A00`, and a layout limit
+of `0xB0000`. Host decoders and validators in `nova/npk/devices.py` observe this
 contract but are test helpers, not guest APIs.
 
 Milestone 7 claims no MMIO device, device tree, framebuffer, keyboard, disk,
-network, hardware interrupt source, preemptive scheduler, process model, or user
-loader. Software IPIs and external interrupts are architectural events injected
-by the reference machine for tests; they are not physical device drivers.
+network, DMA, interrupt controller, preemptive scheduler, wakeup, process model,
+or user loader. Software IPIs and external interrupts are architectural events
+injected by the reference machine for tests; they are not physical device
+drivers. The backend is real kernel software over bounded RAM and the existing
+Nova ISA CSRs, not a fabricated bus or device.
 
 ### Object Manager Design: OpenWindows and WRK Comparison
 
@@ -860,9 +933,16 @@ addresses are identical. The initial layout is:
 | Syscall receipt log | `0x9FA90` | Eight 128-byte syscall receipts |
 | Syscall write log | `0x9FE90` | 256-byte bounded `SYS_WRITE` sink |
 | Syscall scratch | `0x9FF90` | 64-byte uncommitted `SYS_WRITE` copy buffer |
+| Device entry/request/response | `0xA0F00` / `0xA1390` / `0xA1400` | Typed request publication word and bounded request/response blocks |
 | Device state | `0xA1000` | 144-byte M7 state block: magic, version, counters, last interrupt observations, timer interval |
 | Interrupt observation log | `0xA1090` | 16 × 32-byte bounded interrupt records |
 | Capability table | `0xA1290` | 8 × 32-byte support/rejection declarations |
+| Device operation state | `0xA1450` | 144-byte M7 lifecycle counters and last outcome |
+| Device registry | `0xA14E0` | 8 × 64-byte bounded device records |
+| Timer table | `0xA16E0` | 8 × 64-byte bounded software timer records |
+| Timer event log | `0xA18E0` | 8 × 32-byte bounded delivery events |
+| Device/timer receipts | `0xA1A00` / `0xA2A00` | Two independent 32 × 128-byte receipt logs |
+| Device scratch | `0xA3A00` | 64-byte bounded kernel copy buffer |
 | Declared physical arena | `0xC0000`, `0x40000` bytes | Sparse-memory policy arena, not discovered RAM |
 | Unmapped/unused | elsewhere | No RAM bound is modeled by the emulator |
 
@@ -1016,12 +1096,16 @@ the pre-trap privilege is not in the software trap frame.
 NPK separates generic interfaces from concrete backends. Milestone 7 implements
 this contract as follows:
 
+- typed operations: device register/unregister/query/write and timer
+  create/cancel/inspect/expire/deliver pass through the shared five-stage core;
+  bounded registry, timer, event, and receipt tables are the published evidence;
 - console: the M6 `SYS_WRITE` commit path calls the M7 backend and leaves bytes
   in the bounded write log; the host mirrors them to `machine.io_log`;
-- timer: `time` and `timecmp` CSRs plus timer interrupts and `ie`/`ip`/`ivec`,
+- timer: emulator `time` drives software deadlines in bounded RAM records;
+  `timecmp` plus `ie`/`ip`/`ivec` remain the architectural interrupt CSR path,
   accessed only through the small Nova assembly leaves in `devices.s`;
 - interrupt sources: software, timer, and external low `ecause` bits only; no
-  interrupt controller device exists;
+  interrupt controller device exists, and typed timer events are software events;
 - block/input/network: no emulator device exists, so the capability table marks
   them explicitly unsupported instead of claiming drivers.
 

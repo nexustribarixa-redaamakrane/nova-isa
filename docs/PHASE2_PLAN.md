@@ -24,7 +24,7 @@ finished. No future milestone is marked complete early.
 | 4 | Physical and virtual memory management | COMPLETE | Allocation, mapping, permissions, faults, and address-space isolation tested |
 | 5 | Object Manager and Universal Object Model | COMPLETE | Typed object identity, handles, references, namespaces, access policy, destruction, and receipts tested |
 | 6 | Syscall and privilege subsystem | COMPLETE | In-kernel ABI dispatch with validation and error conversion tested |
-| 7 | Device abstraction and timer integration | COMPLETE | Console/timer interfaces tested without invented devices |
+| 7 | Device abstraction and timer integration | COMPLETE | Typed device/timer lifecycle, bounded receipts, console sink, and software timer events tested without invented devices |
 | 8 | Task management and cooperative scheduling | NOT STARTED | Deterministic task creation, yield, and switch tested |
 | 9 | Executable loading and user execution | NOT STARTED | `.nob` user image loads, runs, and terminates under NPK |
 | 10 | Integrated validation and Phase 2 closeout | NOT STARTED | Full regression, NPK validation, report, clean synchronized push |
@@ -654,69 +654,102 @@ store cannot overwrite the host. This is a generated validation harness, not
 firmware, board support, RTL, or native QEMU Nova support.
 
 The validator checks the boot marker, exact step count, and a 64 KiB guest
-memory region against `boot_kernel()`. On this platform the current M7 kernel
-halts after `254492` interpreted Nova steps with the expected `0x4E504B31`
-marker and a byte-identical observation region. The M6 image used before device
-integration halted after `246745` steps.
+memory region against `boot_kernel()`. On this platform the expanded M7 kernel
+halts after `311762` interpreted Nova steps with the expected `0x4E504B31`
+marker and a byte-identical observation region. The narrow pre-expansion M7
+image halted after `254492` steps, and the M6 image used before device
+integration halted after `246745` steps. The host boot default is `400000`
+steps; the expanded kernel still halts deterministically well within it.
 
 **Validation result.**
 
 - `cmake -S . -B <build>` and `cmake --build <build> --target npk_kernel`: PASS.
 - `cmake --build <build> --target npk_qemu_boot`: `QEMU boot: PASS`,
-  `boot marker: 0x4e504b31`, `steps: 254492`.
+  `boot marker: 0x4e504b31`, `steps: 311762`.
 - `python scripts/npk_qemu_boot.py --verbose`: PASS.
 - `python -m pytest -q tests/test_npk_qemu.py`: PASS.
 
 ## Milestone 7 — Device abstraction and timer integration
 
-**Status:** IMPLEMENTED.
+**Status:** COMPLETE.
 
-**Objective.** Provide generic device interfaces only for capabilities the
-platform genuinely has.
+**Objective.** Provide typed device and timer processing through the real NPK
+lifecycle, using only capabilities the platform genuinely has.
 
 **Dependencies.** Milestones 1–6.
 
-**Files changed.** `nova/npk/devices.py`, `nova/npk/src/devices.c`,
-`nova/npk/src/devices.s`, `nova/npk/src/trap.c`, `nova/npk/src/syscalls.c`,
-`nova/npk/src/kernel.c`, `nova/npk/build.py`, `nova/npk/layout.py`,
-`nova/npk/traps.py`, `nova/npk/__init__.py`, `tests/test_npk_devices.py`,
-`scripts/npk_validate.py`, and architecture docs.
+**Files changed.** `nova/npk/layout.py`, `nova/npk/core.py`,
+`nova/npk/devices.py`, `nova/npk/__init__.py`, `nova/npk/boot.py`,
+`nova/npk/build.py`, `nova/npk/src/npk_core.h`, `nova/npk/src/processing.c`,
+`nova/npk/src/devices.c`, `nova/npk/src/devices.s`, `nova/npk/src/start.s`,
+`nova/npk/src/syscalls.c`, `nova/npk/src/trap.c`, `tests/test_npk_devices.py`,
+`tests/test_npk_device_registry.py`, `tests/test_npk_timers.py`,
+`tests/test_npk_device_core_integration.py`, `scripts/npk_validate.py`, and
+architecture docs. `nova/npk/src/kernel.c` is unchanged by the expanded work;
+it retains the single deterministic `npk_device_init()` call in the existing
+initialization order.
 
 **Implementation scope.**
 
-- `SYS_WRITE` commits through `npk_device_console_commit()` in `devices.c`;
-  bytes remain in the Milestone 6 write log and the host mirrors them to
-  `machine.io_log`.
-- The architectural timer backend accesses only `time`, `timecmp`, `ie`, `ip`,
-  and `ivec` through small Nova assembly leaves in `devices.s`, and reprograms
-  `timecmp` once per timer interrupt.
-- The real Milestone 3 trap path classifies `ecode == 8` by the low `ecause`
-  source bits into software/timer/external classes and calls
-  `npk_device_interrupt()` from the device backend.
-- A bounded 144-byte device state block, 16-entry interrupt log, and 8-entry
-  capability table publish observations without creating a new ABI or an MMIO
-  device.
-- Console and timer are marked supported; block, input, and network are explicit
-  rejection entries.
+- Typed request operations `22..30` cover device register, unregister, query,
+  and write, plus timer create, cancel, inspect, expire, and deliver. Reasons
+  `57..77` distinguish bad requests, unsupported kinds/capabilities/backends,
+  missing or duplicate ids, exhaustion, state, parameter, owner/object, and
+  timer-specific failures.
+- Every accepted request uses the shared Milestone 2 operation slots and two
+  processing units. `ADMIT`, `VALIDATE`, `EXECUTE`, `COMMIT`, and `COMPLETE` are
+  real stages with bounded helpers; rejected, failed, and completed outcomes are
+  distinct, and the processing unit is released on every terminal outcome.
+- The 8-entry registry stores unique nonzero ids, kind, caller capability,
+  owner, object handle, state, operation count, and last result. Multiple
+  supported-kind devices are allowed; unsupported kinds and capability or
+  owner/object mismatches are explicit rejections.
+- Device writes use Milestone 4 user-physical validation, copy into bounded
+  kernel scratch during `EXECUTE`, and commit to the Milestone 6 write log. The
+  console sink remains the same bounded log, mirrored by the host into
+  `machine.io_log`; no MMIO, DMA, or host syscall dispatch is involved.
+- The 8-entry timer table and 8-entry event log use explicit `PENDING`,
+  `EXPIRED`, `DELIVERED`, and `CANCELLED` states. Expiration uses the earliest
+  deadline and lowest timer id, cancellation is pending-only, and terminal
+  events are never duplicated or retroactively cancelled.
+- Dedicated 32-entry device and timer receipt tables record operation id, type,
+  processing unit, stage/state/outcome, result/error, reason, full stage trace,
+  and device/timer evidence. Exhaustion is rejected before admission and does
+  not overwrite earlier receipts.
+- The architectural timer/interrupt backend still uses only `time`, `timecmp`,
+  `ie`, `ip`, and `ivec`. The real M3 trap path classifies `ecode == 8` source
+  bits and records frames and exception receipts; timer API events are software
+  events and never inject a hardware interrupt.
 
 **Tests.** Bounded disjoint layout, initialization and capability status,
 `SYS_WRITE` console bytes and `io_log` mirroring, all three interrupt classes
-through the real vector, one-shot timer reprogramming, and rejection of invalid
-sources/intervals. External interrupts are host-injected test events only.
+through the real vector, one-shot timer reprogramming, typed registry lifecycle,
+duplicate/unsupported/capability/object rejection, registry exhaustion, M4
+pointer validation for writes, write-log evidence, timer parameter validation,
+equal-deadline ordering, cancellation/delivery terminality, timer and event
+exhaustion, receipt exhaustion, shared-core processing-unit reuse, receipt
+isolation, trap-path coexistence, and boot-evidence survival. External
+interrupts and injected software interrupts are architectural test events only.
 
-**Validation result.** `tests/test_npk_devices.py` passes 9/9; the rebuilt QEMU
-harness reports `steps: 254492` and byte-identical guest memory against the
+**Validation result.** Focused tests pass in `tests/test_npk_devices.py`,
+`tests/test_npk_device_registry.py`, `tests/test_npk_timers.py`, and
+`tests/test_npk_device_core_integration.py`. `python scripts/npk_validate.py`
+passes both the NPK stage and the unchanged Phase 1 stage. The rebuilt QEMU
+harness reports `steps: 311762` and byte-identical guest memory against the
 reference boot.
 
-**Acceptance criteria.** No invented MMIO device or claim of physical hardware.
+**Acceptance criteria.** No invented MMIO device, physical interrupt, fake bus,
+DMA, scheduler, wakeup, or claim of hardware timer support.
 
-**Known limitations.** No device tree, MMIO, interrupt controller, framebuffer,
-keyboard, disk, or network model. There is no device-specific operation queue,
-preemptive scheduler, process model, or user loader. Caller privilege remains
-unobservable from the exposed machine-mode trap frame.
+**Known limitations.** NovaMachine has no device tree, MMIO, interrupt
+controller, framebuffer, keyboard, disk, or network model. The timer API uses
+the emulator `time` CSR and bounded logical records; it is not a hardware timer.
+Caller privilege remains unobservable from the exposed machine-mode trap frame.
+There is no device-specific ready queue, preemptive scheduler, process model, or
+user loader.
 
-**Completion conditions.** Device contract documented, tests green, regression
-green, committed.
+**Completion conditions.** Device/timer contract documented, focused tests
+green, regression green, committed.
 
 ## Milestone 8 — Task management and cooperative scheduling
 
