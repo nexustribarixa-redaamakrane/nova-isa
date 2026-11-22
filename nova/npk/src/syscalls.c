@@ -310,6 +310,18 @@ int npk_syscall_init(void)
     return NPK_STATUS_OK;
 }
 
+npk_u64 npk_syscall_write_log_count(void)
+{
+    return npk_state()->write_log_count;
+}
+
+void npk_syscall_write_log_advance(npk_u64 count)
+{
+    struct NpkSyscallState *state = npk_state();
+
+    state->write_log_count = state->write_log_count + count;
+}
+
 npk_u64 npk_syscall_validate(struct NpkOperation *op)
 {
     struct NpkTrapFrame *frame = (struct NpkTrapFrame *)op->input;

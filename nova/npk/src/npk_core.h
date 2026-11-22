@@ -64,12 +64,30 @@ struct NpkOperation {
     npk_u64 syscall_error;
     npk_u64 syscall_arg[6];
     npk_u64 syscall_child_receipt;
+    /* Milestone 7 device and timer arguments and committed-evidence helpers. */
+    npk_u64 device_target;
+    npk_u64 device_kind;
+    npk_u64 device_capability;
+    npk_u64 device_owner;
+    npk_u64 device_object;
+    npk_u64 device_arg[4];
+    npk_u64 device_evidence;
+    npk_u64 device_error;
 };
 
 /* Milestone 6 syscall integration points used by the processing core. */
 npk_u64 npk_syscall_validate(struct NpkOperation *op);
 npk_u64 npk_syscall_execute(struct NpkOperation *op);
 npk_u64 npk_syscall_commit(struct NpkOperation *op);
+
+/* Milestone 7 device/timer integration points used by the processing core. */
+npk_u64 npk_device_validate(struct NpkOperation *op);
+npk_u64 npk_device_execute(struct NpkOperation *op);
+npk_u64 npk_device_commit(struct NpkOperation *op);
+void npk_core_set_device_arguments(npk_u64 slot, npk_u64 target,
+                                   npk_u64 kind, npk_u64 capability,
+                                   npk_u64 owner, npk_u64 object,
+                                   npk_u64 *args);
 
 /* Milestone 5 object payload services over Milestone 4 memory state. */
 int npk_memory_region_owned_by(npk_u64 region_id, npk_u64 owner);
@@ -83,6 +101,8 @@ void npk_core_set_syscall_arguments(npk_u64 slot, npk_u64 number,
                                     npk_u64 error, npk_u64 *args);
 npk_u64 npk_core_operation_syscall_error(npk_u64 slot);
 npk_u64 npk_core_operation_syscall_child_receipt(npk_u64 slot);
+npk_u64 npk_core_operation_device_evidence(npk_u64 slot);
+npk_u64 npk_core_operation_device_error(npk_u64 slot);
 void npk_object_clear_receipt_ext(npk_u64 index);
 void npk_object_sync_receipt_ext(struct NpkOperation *op, npk_u64 index);
 int npk_object_selftest(void);
@@ -111,5 +131,9 @@ int npk_object_syscall_request(struct NpkObjectSyscallRequest *request,
 /* Milestone 6 user-pointer helpers over Milestone 4 page tables. */
 npk_u64 npk_memory_user_physical(npk_u64 address, npk_u64 access,
                                  npk_u64 *out_physical);
+
+/* Milestone 6 bounded console sink counters used by the M7 device backend. */
+npk_u64 npk_syscall_write_log_count(void);
+void npk_syscall_write_log_advance(npk_u64 count);
 
 #endif

@@ -86,7 +86,8 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
         "nova-cc kernel",
     )
     _require_ok(
-        cc_main([str(processing_source), *cc_options, "-o", str(processing_object)]),
+        cc_main([str(processing_source), *cc_options,
+                 "-o", str(processing_object)]),
         "nova-cc processing",
     )
     _require_ok(
@@ -107,7 +108,8 @@ def build_kernel(output_dir: str | Path, *, keep_objects: bool = False) -> Path:
         "nova-cc syscalls",
     )
     _require_ok(
-        cc_main([str(devices_c_source), *cc_options, "-o", str(devices_c_object)]),
+        cc_main([str(devices_c_source), *cc_options,
+                 "-o", str(devices_c_object)]),
         "nova-cc devices",
     )
 

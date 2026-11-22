@@ -31,6 +31,11 @@ _npk_start:
     LI r2, 0x96050
     STD r1, [r2]
 
+    ; Publish the typed device/timer request entry address for post-boot tests.
+    LA r1, npk_device_request
+    LI r2, 0xA0F00
+    STD r1, [r2]
+
     LA ra, .Lnpk_halt
     BL npk_main
 .Lnpk_halt:

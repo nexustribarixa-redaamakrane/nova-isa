@@ -55,7 +55,7 @@ class BootResult:
     stack_pointer: int
 
 
-def boot_kernel(image: NobImage, *, max_steps: int = 300_000) -> BootResult:
+def boot_kernel(image: NobImage, *, max_steps: int = 400_000) -> BootResult:
     """Boot a validated NPK image on the reference machine."""
     validate_kernel_image(image)
     if max_steps <= 0:

@@ -22,6 +22,8 @@
 #define NPK_MEMORY_RECEIPT_TABLE_ADDRESS 0x92050
 #define NPK_OBJECT_RECEIPT_TABLE_ADDRESS 0x9A190
 #define NPK_SYSCALL_RECEIPT_TABLE_ADDRESS 0x9FA90
+#define NPK_DEVICE_RECEIPT_TABLE_ADDRESS 0xA1A00
+#define NPK_TIMER_RECEIPT_TABLE_ADDRESS 0xA2A00
 
 #define NPK_PROCESS_MAGIC 0x4E504B50
 #define NPK_CORE_MAGIC 0x4E504B43
@@ -35,6 +37,8 @@
 #define NPK_MEMORY_RECEIPT_SLOTS 128
 #define NPK_OBJECT_RECEIPT_SLOTS 128
 #define NPK_SYSCALL_RECEIPT_SLOTS 8
+#define NPK_DEVICE_RECEIPT_SLOTS 32
+#define NPK_TIMER_RECEIPT_SLOTS 32
 #define NPK_STAGE_COUNT 5
 
 #define NPK_OP_BOOT_VERIFY 1
@@ -58,6 +62,15 @@
 #define NPK_OP_OBJECT_TYPE_REGISTER 19
 #define NPK_OP_OBJECT_TYPE_QUERY 20
 #define NPK_OP_SYSCALL_SERVICE 21
+#define NPK_OP_DEVICE_REGISTER 22
+#define NPK_OP_DEVICE_UNREGISTER 23
+#define NPK_OP_DEVICE_QUERY 24
+#define NPK_OP_DEVICE_WRITE 25
+#define NPK_OP_TIMER_CREATE 26
+#define NPK_OP_TIMER_CANCEL 27
+#define NPK_OP_TIMER_INSPECT 28
+#define NPK_OP_TIMER_EXPIRE 29
+#define NPK_OP_TIMER_DELIVER 30
 
 #define NPK_BOOT_INPUT 0x4E504B31
 #define NPK_PROCESSED_BOOT_OUTPUT 0x4E504B32
@@ -151,6 +164,27 @@
 #define NPK_REASON_SYSCALL_NOT_FOUND 54
 #define NPK_REASON_SYSCALL_COMMIT 55
 #define NPK_REASON_SYSCALL_CHILD 56
+#define NPK_REASON_DEVICE_BAD_REQUEST 57
+#define NPK_REASON_DEVICE_BAD_KIND 58
+#define NPK_REASON_DEVICE_UNSUPPORTED 59
+#define NPK_REASON_DEVICE_NOT_FOUND 60
+#define NPK_REASON_DEVICE_DUPLICATE 61
+#define NPK_REASON_DEVICE_EXHAUSTED 62
+#define NPK_REASON_DEVICE_STATE 63
+#define NPK_REASON_DEVICE_CAPABILITY 64
+#define NPK_REASON_DEVICE_BAD_PARAMETER 65
+#define NPK_REASON_DEVICE_OWNER 66
+#define NPK_REASON_DEVICE_OBJECT 67
+#define NPK_REASON_TIMER_BAD_REQUEST 68
+#define NPK_REASON_TIMER_NOT_FOUND 69
+#define NPK_REASON_TIMER_DUPLICATE 70
+#define NPK_REASON_TIMER_EXHAUSTED 71
+#define NPK_REASON_TIMER_STATE 72
+#define NPK_REASON_TIMER_NOT_DUE 73
+#define NPK_REASON_TIMER_BAD_INTERVAL 74
+#define NPK_REASON_TIMER_EVENT 75
+#define NPK_REASON_TIMER_UNSUPPORTED 76
+#define NPK_REASON_DEVICE_BACKEND 77
 
 #define NPK_OK 0
 #define NPK_ERR_BAD_ID 1
@@ -236,6 +270,8 @@ static npk_u64 next_trap_receipt_index;
 static npk_u64 next_memory_receipt_index;
 static npk_u64 next_object_receipt_index;
 static npk_u64 next_syscall_receipt_index;
+static npk_u64 next_device_receipt_index;
+static npk_u64 next_timer_receipt_index;
 
 static struct NpkLegacyReceipt *npk_legacy_receipt(void)
 {
@@ -313,6 +349,29 @@ static int npk_core_is_object_type(npk_u64 type)
 
 #define npk_core_is_syscall_type(type) ((type) == NPK_OP_SYSCALL_SERVICE)
 
+static int npk_core_is_device_type(npk_u64 type)
+{
+    if (type == NPK_OP_DEVICE_REGISTER ||
+            type == NPK_OP_DEVICE_UNREGISTER ||
+            type == NPK_OP_DEVICE_QUERY ||
+            type == NPK_OP_DEVICE_WRITE) {
+        return 1;
+    }
+    return 0;
+}
+
+static int npk_core_is_timer_type(npk_u64 type)
+{
+    if (type == NPK_OP_TIMER_CREATE ||
+            type == NPK_OP_TIMER_CANCEL ||
+            type == NPK_OP_TIMER_INSPECT ||
+            type == NPK_OP_TIMER_EXPIRE ||
+            type == NPK_OP_TIMER_DELIVER) {
+        return 1;
+    }
+    return 0;
+}
+
 static npk_u64 npk_core_receipt_base(npk_u64 type)
 {
     if (type == NPK_OP_TRAP_PROCESS) {
@@ -326,6 +385,12 @@ static npk_u64 npk_core_receipt_base(npk_u64 type)
     }
     if (npk_core_is_syscall_type(type)) {
         return NPK_SYSCALL_RECEIPT_TABLE_ADDRESS;
+    }
+    if (npk_core_is_device_type(type)) {
+        return NPK_DEVICE_RECEIPT_TABLE_ADDRESS;
+    }
+    if (npk_core_is_timer_type(type)) {
+        return NPK_TIMER_RECEIPT_TABLE_ADDRESS;
     }
     return NPK_RECEIPT_TABLE_ADDRESS;
 }
@@ -344,6 +409,12 @@ static npk_u64 npk_core_receipt_slots(npk_u64 type)
     if (npk_core_is_syscall_type(type)) {
         return NPK_SYSCALL_RECEIPT_SLOTS;
     }
+    if (npk_core_is_device_type(type)) {
+        return NPK_DEVICE_RECEIPT_SLOTS;
+    }
+    if (npk_core_is_timer_type(type)) {
+        return NPK_TIMER_RECEIPT_SLOTS;
+    }
     return NPK_RECEIPT_SLOTS;
 }
 
@@ -360,6 +431,12 @@ static npk_u64 *npk_core_next_receipt(npk_u64 type)
     }
     if (npk_core_is_syscall_type(type)) {
         return &next_syscall_receipt_index;
+    }
+    if (npk_core_is_device_type(type)) {
+        return &next_device_receipt_index;
+    }
+    if (npk_core_is_timer_type(type)) {
+        return &next_timer_receipt_index;
     }
     return &next_receipt_index;
 }
@@ -382,6 +459,12 @@ static int npk_core_valid_type(npk_u64 type)
         return 1;
     }
     if (npk_core_is_syscall_type(type)) {
+        return 1;
+    }
+    if (npk_core_is_device_type(type)) {
+        return 1;
+    }
+    if (npk_core_is_timer_type(type)) {
         return 1;
     }
     return 0;
@@ -476,6 +559,11 @@ static void npk_core_sync_receipt(struct NpkOperation *op)
         receipt->reserved[0] = op->syscall_number;
         receipt->reserved[1] = op->syscall_error;
     }
+    if (npk_core_is_device_type(op->type) ||
+            npk_core_is_timer_type(op->type)) {
+        receipt->reserved[0] = op->device_target;
+        receipt->reserved[1] = op->device_error;
+    }
 }
 
 static void npk_core_sync_legacy(struct NpkOperation *op)
@@ -560,6 +648,8 @@ void npk_core_init(void)
     next_memory_receipt_index = 0;
     next_object_receipt_index = 0;
     next_syscall_receipt_index = 0;
+    next_device_receipt_index = 0;
+    next_timer_receipt_index = 0;
 
     for (i = 0; i < NPK_OP_SLOTS; i = i + 1) {
         operations[i].id = 0;
@@ -593,6 +683,17 @@ void npk_core_init(void)
         operations[i].object_name[3] = 0;
         operations[i].object_handle = 0;
         operations[i].object_namespace = 0;
+        operations[i].device_target = 0;
+        operations[i].device_kind = 0;
+        operations[i].device_capability = 0;
+        operations[i].device_owner = 0;
+        operations[i].device_object = 0;
+        operations[i].device_arg[0] = 0;
+        operations[i].device_arg[1] = 0;
+        operations[i].device_arg[2] = 0;
+        operations[i].device_arg[3] = 0;
+        operations[i].device_evidence = 0;
+        operations[i].device_error = 0;
     }
     for (i = 0; i < NPK_PU_COUNT; i = i + 1) {
         processing_units[i].id = i;
@@ -785,6 +886,17 @@ int npk_core_admit(npk_u64 type, npk_u64 id, npk_u64 input, npk_u64 *out_slot)
     op->syscall_arg[4] = 0;
     op->syscall_arg[5] = 0;
     op->syscall_child_receipt = NPK_NO_INDEX;
+    op->device_target = 0;
+    op->device_kind = 0;
+    op->device_capability = 0;
+    op->device_owner = 0;
+    op->device_object = 0;
+    op->device_arg[0] = 0;
+    op->device_arg[1] = 0;
+    op->device_arg[2] = 0;
+    op->device_arg[3] = 0;
+    op->device_evidence = 0;
+    op->device_error = 0;
     *next = *next + 1;
 
     processing_units[pu].state = NPK_PU_BUSY;
@@ -871,6 +983,30 @@ void npk_core_set_syscall_arguments(npk_u64 slot, npk_u64 number,
     }
 }
 
+void npk_core_set_device_arguments(npk_u64 slot, npk_u64 target,
+                                   npk_u64 kind, npk_u64 capability,
+                                   npk_u64 owner, npk_u64 object,
+                                   npk_u64 *args)
+{
+    struct NpkOperation *op;
+    npk_u64 i;
+
+    if (slot >= NPK_OP_SLOTS) {
+        return;
+    }
+    op = &operations[slot];
+    op->device_target = target;
+    op->device_kind = kind;
+    op->device_capability = capability;
+    op->device_owner = owner;
+    op->device_object = object;
+    for (i = 0; i < 4; i = i + 1) {
+        op->device_arg[i] = args[i];
+    }
+    op->device_evidence = 0;
+    op->device_error = 0;
+}
+
 static int npk_core_is_terminal(npk_u64 state)
 {
     if (state == NPK_OP_STATE_COMPLETE) {
@@ -907,6 +1043,78 @@ static void npk_core_terminate(struct NpkOperation *op, npk_u64 state,
     npk_core_publish(op);
 }
 
+static npk_u64 npk_core_validate_operation(struct NpkOperation *op)
+{
+    if (op->type == NPK_OP_BOOT_VERIFY) {
+        return npk_boot_validate(op);
+    }
+    if (op->type == NPK_OP_TRAP_PROCESS) {
+        return npk_trap_validate(op);
+    }
+    if (npk_core_is_memory_type(op->type)) {
+        return npk_memory_validate(op);
+    }
+    if (npk_core_is_object_type(op->type)) {
+        return npk_object_validate(op);
+    }
+    if (npk_core_is_syscall_type(op->type)) {
+        return npk_syscall_validate(op);
+    }
+    if (npk_core_is_device_type(op->type) ||
+            npk_core_is_timer_type(op->type)) {
+        return npk_device_validate(op);
+    }
+    return npk_diag_validate(op);
+}
+
+static npk_u64 npk_core_execute_operation(struct NpkOperation *op)
+{
+    if (op->type == NPK_OP_BOOT_VERIFY) {
+        return npk_boot_execute(op);
+    }
+    if (op->type == NPK_OP_TRAP_PROCESS) {
+        return npk_trap_execute(op);
+    }
+    if (npk_core_is_memory_type(op->type)) {
+        return npk_memory_execute(op);
+    }
+    if (npk_core_is_object_type(op->type)) {
+        return npk_object_execute(op);
+    }
+    if (npk_core_is_syscall_type(op->type)) {
+        return npk_syscall_execute(op);
+    }
+    if (npk_core_is_device_type(op->type) ||
+            npk_core_is_timer_type(op->type)) {
+        return npk_device_execute(op);
+    }
+    return npk_diag_execute(op);
+}
+
+static npk_u64 npk_core_commit_operation(struct NpkOperation *op)
+{
+    if (op->type == NPK_OP_BOOT_VERIFY) {
+        return npk_boot_commit(op);
+    }
+    if (op->type == NPK_OP_TRAP_PROCESS) {
+        return npk_trap_commit(op);
+    }
+    if (npk_core_is_memory_type(op->type)) {
+        return npk_memory_commit(op);
+    }
+    if (npk_core_is_object_type(op->type)) {
+        return npk_object_commit(op);
+    }
+    if (npk_core_is_syscall_type(op->type)) {
+        return npk_syscall_commit(op);
+    }
+    if (npk_core_is_device_type(op->type) ||
+            npk_core_is_timer_type(op->type)) {
+        return npk_device_commit(op);
+    }
+    return npk_diag_commit(op);
+}
+
 int npk_core_advance_as(npk_u64 slot, npk_u64 requested_pu)
 {
     struct NpkOperation *op;
@@ -938,19 +1146,7 @@ int npk_core_advance_as(npk_u64 slot, npk_u64 requested_pu)
 
     if (op->state == NPK_OP_STATE_ADMITTED) {
         npk_core_mark_stage(op, NPK_STAGE_VALIDATE);
-        if (op->type == NPK_OP_BOOT_VERIFY) {
-            reason = npk_boot_validate(op);
-        } else if (op->type == NPK_OP_TRAP_PROCESS) {
-            reason = npk_trap_validate(op);
-        } else if (npk_core_is_memory_type(op->type)) {
-            reason = npk_memory_validate(op);
-        } else if (npk_core_is_object_type(op->type)) {
-            reason = npk_object_validate(op);
-        } else if (npk_core_is_syscall_type(op->type)) {
-            reason = npk_syscall_validate(op);
-        } else {
-            reason = npk_diag_validate(op);
-        }
+        reason = npk_core_validate_operation(op);
         if (reason != NPK_REASON_NONE) {
             npk_core_terminate(op, NPK_OP_STATE_REJECTED,
                                NPK_OUTCOME_REJECTED, reason);
@@ -963,19 +1159,7 @@ int npk_core_advance_as(npk_u64 slot, npk_u64 requested_pu)
 
     if (op->state == NPK_OP_STATE_VALIDATED) {
         npk_core_mark_stage(op, NPK_STAGE_EXECUTE);
-        if (op->type == NPK_OP_BOOT_VERIFY) {
-            reason = npk_boot_execute(op);
-        } else if (op->type == NPK_OP_TRAP_PROCESS) {
-            reason = npk_trap_execute(op);
-        } else if (npk_core_is_memory_type(op->type)) {
-            reason = npk_memory_execute(op);
-        } else if (npk_core_is_object_type(op->type)) {
-            reason = npk_object_execute(op);
-        } else if (npk_core_is_syscall_type(op->type)) {
-            reason = npk_syscall_execute(op);
-        } else {
-            reason = npk_diag_execute(op);
-        }
+        reason = npk_core_execute_operation(op);
         if (reason != NPK_REASON_NONE) {
             npk_core_terminate(op, NPK_OP_STATE_FAILED, NPK_OUTCOME_FAILED,
                                reason);
@@ -988,19 +1172,7 @@ int npk_core_advance_as(npk_u64 slot, npk_u64 requested_pu)
 
     if (op->state == NPK_OP_STATE_EXECUTED) {
         npk_core_mark_stage(op, NPK_STAGE_COMMIT);
-        if (op->type == NPK_OP_BOOT_VERIFY) {
-            reason = npk_boot_commit(op);
-        } else if (op->type == NPK_OP_TRAP_PROCESS) {
-            reason = npk_trap_commit(op);
-        } else if (npk_core_is_memory_type(op->type)) {
-            reason = npk_memory_commit(op);
-        } else if (npk_core_is_object_type(op->type)) {
-            reason = npk_object_commit(op);
-        } else if (npk_core_is_syscall_type(op->type)) {
-            reason = npk_syscall_commit(op);
-        } else {
-            reason = npk_diag_commit(op);
-        }
+        reason = npk_core_commit_operation(op);
         if (reason != NPK_REASON_NONE) {
             npk_core_terminate(op, NPK_OP_STATE_FAILED, NPK_OUTCOME_FAILED,
                                reason);
@@ -1096,6 +1268,17 @@ int npk_core_release(npk_u64 slot)
     op->syscall_arg[4] = 0;
     op->syscall_arg[5] = 0;
     op->syscall_child_receipt = NPK_NO_INDEX;
+    op->device_target = 0;
+    op->device_kind = 0;
+    op->device_capability = 0;
+    op->device_owner = 0;
+    op->device_object = 0;
+    op->device_arg[0] = 0;
+    op->device_arg[1] = 0;
+    op->device_arg[2] = 0;
+    op->device_arg[3] = 0;
+    op->device_evidence = 0;
+    op->device_error = 0;
 
     core->last_transition_status = NPK_OK;
     npk_core_publish_op(op);
@@ -1149,6 +1332,22 @@ npk_u64 npk_core_operation_syscall_child_receipt(npk_u64 slot)
         return NPK_NO_INDEX;
     }
     return operations[slot].syscall_child_receipt;
+}
+
+npk_u64 npk_core_operation_device_evidence(npk_u64 slot)
+{
+    if (slot >= NPK_OP_SLOTS) {
+        return 0;
+    }
+    return operations[slot].device_evidence;
+}
+
+npk_u64 npk_core_operation_device_error(npk_u64 slot)
+{
+    if (slot >= NPK_OP_SLOTS) {
+        return 0;
+    }
+    return operations[slot].device_error;
 }
 
 int npk_core_probe_busy_unit(npk_u64 pu)
