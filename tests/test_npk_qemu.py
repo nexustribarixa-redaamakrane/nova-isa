@@ -80,3 +80,63 @@ def test_translator_emits_correct_imul_and_csr_init():
     csr_offset = qt.QEMU_LAYOUT["csrs"] - qt.QEMU_LAYOUT["harness_base"]
     vbar_reset = struct.unpack_from("<Q", harness, csr_offset + 5 * 8)[0]
     assert vbar_reset == 0x1000
+
+
+def _translate_words(words, image_base=0x1000):
+    image = NobImage(
+        image_base=image_base,
+        entry=image_base,
+        image=b"".join(struct.pack("<I", word) for word in words),
+    )
+    return qt._NovaTranslator(image).translate()
+
+
+def test_translator_supports_m8_integer_and_control_flow_instructions():
+    # UDIV r4,r5,r6; REM r7,r8,r9; UREM r10,r11,r12; NOT r13,r14; RET; MRET; TLBI r0; HALT
+    words = [
+        0x03214C00,  # UDIV
+        0x143A1200,  # REM
+        0x0452D800,  # UREM
+        0x1D6B8000,  # NOT
+        0x5C000000,  # RET
+        0x61000000,  # MRET
+        0x2D000000,  # TLBI
+        0x64000000,  # HALT
+    ]
+    harness, code = _translate_words(words)
+    assert b"\x48\xf7\xf1" in code      # div rcx (UDIV/UREM)
+    assert b"\x48\xf7\xf9" in code      # idiv rcx (DIV/REM)
+    assert b"\x48\xf7\xd0" in code      # not rax
+    assert qt.QEMU_LAYOUT["ex_depth"] < qt.QEMU_LAYOUT["ex_stack"]
+    # MRET path reads/writes hidden exception stack and restores EPC/ECODE/PRIV.
+    assert struct.pack("<I", qt.QEMU_LAYOUT["ex_depth"]) in code
+    assert struct.pack("<I", qt.QEMU_LAYOUT["ex_stack"]) in code
+    # No translation error: harness contains jump table entries for each word.
+    table_off = qt.QEMU_LAYOUT["table"] - qt.QEMU_LAYOUT["harness_base"]
+    assert len(harness) >= table_off + len(words) * 8
+
+
+def test_translator_mret_loads_csr_base_before_csr_access():
+    # MRET restores PRIV/ECODE/EPC through load_csr/store_csr, which index the
+    # CSR file from RDX. The emitted path must load that base before every CSR
+    # access or the restored state lands in unrelated harness data.
+    _harness, code = _translate_words([0x61000000, 0x64000000])  # MRET; HALT
+    mov_rdx_csr_base = b"\x48\xba" + struct.pack("<Q", qt.QEMU_LAYOUT["csrs"])
+    assert code.count(mov_rdx_csr_base) >= 2
+    # The error handler stores the failing PC held in RDI.
+    assert b"\x48\x89\x3a" in code  # mov [rdx],rdi
+
+
+def test_translator_undecodable_word_reports_its_own_pc():
+    # An undecodable word branches to the shared error handler before any
+    # instruction emitter runs, so the translator must carry that word's PC.
+    address = 0x2000
+    _harness, code = _translate_words([0xFFFFFFFF], image_base=address)
+    assert b"\x48\xbf" + struct.pack("<Q", address) in code  # mov rdi,imm64
+
+
+def test_qemu_error_handler_reports_failing_pc():
+    layout = qt.QEMU_LAYOUT
+    assert "error_pc" in layout
+    assert layout["error_pc"] > layout["steps"]
+    assert layout["error_word"] > layout["error_pc"]

@@ -205,7 +205,7 @@ def test_sys_time_returns_time_and_publishes_a_complete_receipt(image):
         outcome.state.last_receipt_index] == receipt
 
 
-def test_exit_and_yield_record_policy_without_inventing_processes(image):
+def test_exit_and_yield_use_cooperative_task_scheduler(image):
     machine = fresh_machine(image)
     first = npk.call_syscall(machine, npk.SYS_EXIT, 7)
     check_call(machine, first, number=npk.SYS_EXIT, a0=0)
@@ -216,6 +216,11 @@ def test_exit_and_yield_record_policy_without_inventing_processes(image):
     assert second.state.flags & npk.FLAG_YIELD_REQUESTED
     assert second.state.flags & npk.FLAG_EXIT_REQUESTED
     assert second.state.flags & npk.FLAG_HANDLER_CONTEXT
+
+    task_state = npk.decode_task_state(machine)
+    npk.validate_task_state(task_state)
+    assert task_state.task_count >= 1
+    assert task_state.current_task != 0
 
     core = npk.decode_core_snapshot(machine).core
     assert core.pu_state == (core_api.PU_IDLE, core_api.PU_IDLE)
