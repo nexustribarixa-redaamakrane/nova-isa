@@ -753,31 +753,92 @@ green, regression green, committed.
 
 ## Milestone 8 — Task management and cooperative scheduling
 
-**Objective.** Implement tasks, states, ready queues, `SYS_YIELD`, and context
-switching without claiming preemption prematurely.
+**Status:** COMPLETE.
+
+**Objective.** Implement honest cooperative task and execution management through
+the NPK processing core, without claiming preemption, process isolation, or
+hardware context switching that Nova/NPK do not provide.
 
 **Dependencies.** Milestones 1–7.
 
-**Files likely to change.** `nova/npk/tasks.py`, scheduler/context code,
-`tests/test_npk_tasks.py`, architecture docs.
+**Files changed.** `nova/npk/src/tasks.c`, `nova/npk/src/tasks.s`,
+`nova/npk/src/trap.c`, `nova/npk/src/syscalls.c`, `nova/npk/src/processing.c`,
+`nova/npk/src/npk_core.h`, `nova/npk/src/kernel.c`, `nova/npk/src/start.s`,
+`nova/npk/tasks.py`, `nova/npk/core.py`, `nova/npk/layout.py`,
+`nova/npk/build.py`, `nova/npk/__init__.py`, `nova/npk/qemu_translator.py`,
+`scripts/npk_qemu_boot.py`, `scripts/npk_validate.py`, `.gitignore`,
+`tests/test_npk_tasks.py`, updated `tests/test_npk_qemu.py`,
+`tests/test_npk_syscalls.py`, and NPK docs.
 
 **Implementation scope.**
 
-- TCB with state, stack, saved context, and address space.
-- Cooperative scheduler and deterministic ready queue.
-- Context switch that preserves the software trap frame and `ptbr`.
-- Task creation and termination.
+- Bounded task table (8 slots), deterministic FIFO ready queue, and TCB records
+  with stable task ID, generation, state, owner, parent, entry, stack bounds,
+  arg, address-space field, exit status, resume PC/patch metadata, flags, and
+  saved software trap-frame context.
+- Task states: `FREE`, `CREATED`, `READY`, `RUNNING`, `BLOCKED`, `TERMINATED`.
+  Typed task operations: create, terminate, yield, block, wake, query, destroy.
+  Every supported task operation traverses `ADMIT → VALIDATE → EXECUTE → COMMIT →
+  COMPLETE` through the shared processing core and emits a bounded task receipt.
+- Cooperative scheduling is integrated at the existing trap/syscall boundary.
+  `SYS_YIELD` and `SYS_EXIT` remain ABI-compatible syscalls (`0` and `7`); after
+  a successful syscall dispatch, `trap.c` invokes `npk_task_schedule()`.
+  Rejected/failed syscalls do not reschedule.
+- Context-switch model is honest to Nova semantics: Nova `MRET` restores
+  EPC/privilege from the emulator hidden exception stack, not from the software
+  trap frame. The scheduler saves/restores software TCB frame state, patches a
+  suspended writable return site with `JMP r15` (`0x50780000`), restores the
+  selected task's software frame into the live trap frame, and sets `frame->gpr[15]`
+  to the selected resume PC before `MRET` returns to the patched site.
+- Bootstrap/idle behavior: the first scheduler-visible trap context is captured as
+  a resumable kernel/bootstrap task. If no resumable task remains after terminate/
+  block, the scheduler patches the return site to an honest halt trampoline rather
+  than inventing a runnable user task.
+- `SYS_YIELD`/`SYS_EXIT` behavior is real cooperative scheduling policy, not a
+  host-only placeholder: yield records yield request and reschedules; exit records
+  exit request, terminates the current task, and schedules or halts cooperatively.
+- The generated QEMU interpreter gained `UDIV`, `REM`, `UREM`, `NOT`, `RET`,
+  `MRET`, and `TLBI` coverage and records the failing PC/word on translator error.
+  `TLBI` is a no-op barrier in the non-paging shadow. The normal MRET return path
+  restores EPC/ECODE/privilege from a shadow stack; exception entry, depth-4
+  overflow, and trap delivery for underflow/misaligned EPC remain harness
+  limitations.
 
-**Tests.** Creation, state transitions, yield ordering, isolation of stacks,
-termination status.
+**Tests.** `tests/test_npk_tasks.py` covers layout/initial state, create/query
+receipts, validation/duplicate rejection, block/wake/transition checks,
+terminate/query/stale lookup behavior, cooperative `SYS_YIELD` reschedule,
+`SYS_EXIT` termination/no-runnable behavior, bounded receipts, destroy/recreate,
+slot exhaustion/no partial mutation, TCB frame non-overlap at full capacity,
+failed `TASK_WAKE` with a full queue, rejected syscalls staying out of the
+scheduler, and task-query processing-core integration.
+`tests/test_npk_syscalls.py` was deliberately updated for M8 `SYS_YIELD`/
+`SYS_EXIT` cooperative behavior while preserving unaffected syscall semantics.
+`tests/test_npk_qemu.py` covers the new translator instruction coverage and
+error-PC diagnostics. `scripts/npk_validate.py` includes both
+`tests/test_npk_tasks.py` and `tests/test_npk_qemu.py`.
 
-**Acceptance criteria.** Tests demonstrate cooperative scheduling only.
+**Acceptance criteria.** Cooperative task lifecycle, deterministic ready queue,
+bounded receipts, and syscall-integrated yield/exit are tested through real NPK
+paths; no preemption/SMP/process-isolation claims are made.
 
-**Known limitations.** No preemptive scheduling; `SYS_YIELD` in the reference
-host model is not NPK's scheduler; no threads/processes split yet.
+**Known limitations.** Cooperative only; no preemption, timer-driven scheduling,
+SMP, per-task address-space isolation, user loader, process/thread split, MMIO,
+M9, or M10. Tasks share a single address space unless/until a future milestone
+implements isolated address-space activation. The context switch depends on
+writable return sites and single-level trap-frame assumptions. Freshly created
+tasks are kernel records/READY queue entries but are not magically started as
+user contexts without an explicit future execution/start model. M6 caller-
+privilege enforcement remains limited because the exposed trap frame does not
+carry original caller privilege. The QEMU path is a generated x86-64 interpreter
+executing Nova bytecode, not native Nova support in QEMU. Its MRET model covers
+the normal return path only; exception entry, exception-stack overflow, and trap
+delivery for underflow/misaligned EPC are not modeled.
 
-**Completion conditions.** Task model documented, tests green, regression green,
-committed.
+**Completion conditions.** Task model/tests/docs/validation green, logical M8
+commits created, `master` pushed only after validation passes. CTest exit status
+is not treated as test evidence because it discovers no tests in this
+configuration; full pytest, NPK validation, phase1 validation, and QEMU boot are
+the recorded gates.
 
 ## Milestone 9 — Executable loading and user execution
 

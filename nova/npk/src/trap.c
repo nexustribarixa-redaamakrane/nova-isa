@@ -38,6 +38,9 @@
 #define NPK_ECODE_INTERRUPT 8
 #define NPK_ECODE_SOFTWARE_TRAP 10
 
+/* ABI failure marker published by the syscall dispatcher in a0/a1. */
+#define NPK_SYSCALL_FAILURE 0xFFFFFFFFFFFFFFFFULL
+
 #define NPK_SOURCE_SOFTWARE 0
 #define NPK_SOURCE_TIMER 1
 #define NPK_SOURCE_EXTERNAL 2
@@ -323,8 +326,23 @@ int npk_trap_dispatch(struct NpkTrapFrame *frame)
             state->classification == NPK_CLASS_SYSTEM_CALL &&
             frame->ecode == 7 && frame->epc % 4 == 0 &&
             frame->handler_priv == 2) {
+        npk_u64 resume_pc = 0;
+        npk_u64 syscall_number = frame->ecause;
         syscall_status = npk_syscall_dispatch(frame);
         state->reserved[0] = (npk_u64)syscall_status;
+        /* Milestone 8 cooperative scheduling: only successful SYS_YIELD/SYS_EXIT
+         * reach the scheduler. The lifecycle status is zero even for an
+         * ABI-rejected call, so require the published a0/a1 success result too.
+         * Rejected/failed syscalls return normally. */
+        if (syscall_status == 0 &&
+            frame->gpr[1] != NPK_SYSCALL_FAILURE && frame->gpr[2] == 0 &&
+            (syscall_number == 7 || syscall_number == 0)) {
+            npk_u64 cause = (syscall_number == 0) ? 32 : 33; /* TASK_TERMINATE/TASK_YIELD */
+            npk_task_schedule(frame, cause, &resume_pc);
+            state->reserved[1] = resume_pc;
+        } else {
+            state->reserved[1] = 0;
+        }
     }
     return status;
 }

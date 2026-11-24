@@ -132,9 +132,10 @@ Processing and scheduling are different mechanisms:
 - a scheduler must not skip a stage or promote an unvalidated operation.
 
 Milestone 1 has a fixed boot operation and therefore no scheduler. Milestone 2
-has four operation slots and two units but still no scheduler. Cooperative
-scheduling in Milestone 8, and any later preemptive scheduling, will select
-operations for processing units; they will not replace the pipeline.
+has four operation slots and two units but still no scheduler. Milestone 8 adds
+cooperative task scheduling through the existing trap/syscall boundary: it
+selects resumable task contexts and records task transitions as typed operations,
+but it does not replace the processing pipeline or claim preemption.
 
 ### Interaction with other subsystems
 
@@ -887,6 +888,17 @@ interpreter adds that offset to Nova data addresses; Nova software therefore
 sees its architectural stack, marker, receipt, and vector addresses. Generated
 interpreter code is placed above the shadow to avoid self-overwrite.
 
+For Milestone 8 the translator also covers `UDIV`, `REM`, `UREM`, `NOT`, `RET`,
+`MRET`, and `TLBI`. `TLBI` is an explicit no-op barrier because this interpreter
+has no software TLB. Translator errors record the failing Nova PC and word; the
+boot blocker was diagnosed this way as `UDIV` at PC `0x67890`, word `0x339d000`.
+The emitted normal MRET return path restores EPC, ECODE, and privilege from a
+shadow exception stack, but the harness has no exception-entry producer and does
+not execute that path during boot validation. Exception entry, architectural
+exception-stack overflow, and Nova trap delivery for MRET underflow or misaligned
+EPC are not modeled; those cases stop the harness at the recorded error PC. This
+is harness-only evidence, not full ISA conformance.
+
 This harness validates the boot marker, exact step count, and a 64 KiB guest
 memory region against the Python reference boot. It is not native Nova support
 in QEMU, firmware, board support, RTL, physical-hardware validation, or an ISA
@@ -1115,21 +1127,64 @@ faked as a register range in NPK code.
 
 ## 12. Task management and scheduling
 
-NPK begins with cooperative multitasking:
+Milestone 8 implements cooperative task and execution management through the
+shared processing core and existing trap/syscall boundary.
 
-- a task control block holds state, stack, saved context, and address space;
-- states are `NEW`, `READY`, `RUNNING`, `BLOCKED`, and `EXITED`;
-- ready tasks are held explicitly, not discovered from emulator state;
-- `SYS_YIELD` becomes a real scheduler entry point in NPK;
-- context switching saves/restores the software context and `ptbr`.
+### Task model
 
-Preemptive scheduling is not claimed until the timer interrupt path is
-implemented and tested end to end. The reference `SYS_YIELD` currently just
-halts the machine; that is a limitation of the host model, not NPK scheduling.
+- Bounded TCB table: 8 slots, 576-byte records at `0xB0130`, with stable task ID,
+  generation, state, owner, parent, entry, stack bounds/top, arg, address-space
+  field, exit status, resume PC/patch metadata, flags, and saved software trap
+  frame (`38` u64 words matching the M3 trap-frame layout).
+- States: `FREE`, `CREATED`, `READY`, `RUNNING`, `BLOCKED`, `TERMINATED`.
+- Deterministic ready queue: 8-entry FIFO at `0xB1D30`; scheduler selects the
+  first resumable READY task (captured trap context flag set).
+- Typed task operations: `CREATE`, `TERMINATE`, `YIELD`, `BLOCK`, `WAKE`,
+  `QUERY`, `DESTROY`. All traverse `ADMIT → VALIDATE → EXECUTE → COMMIT →
+  COMPLETE` and emit bounded task receipts at `0xB1DB0`.
 
-Processes and threads remain distinct concepts in the architecture. Phase 2
-may define a single task abstraction first, but the documentation must state
-which model is implemented.
+### Cooperative scheduling and context switch
+
+`SYS_YIELD`/`SYS_EXIT` are still ABI syscalls `7` and `0`. After a successful
+syscall dispatch, `trap.c` calls `npk_task_schedule()` with task-cause
+`YIELD`/`TERMINATE`. Rejected or failed syscalls do not reschedule.
+
+Nova `MRET` restores EPC/privilege from the emulator hidden exception stack, not
+from the software trap frame. NPK therefore cannot redirect return by editing
+`frame->epc` alone. The cooperative scheduler:
+
+1. bootstraps/captures the current live trap context as a resumable task;
+2. saves software frame state to the current TCB and marks it READY/BLOCKED/
+   TERMINATED as requested;
+3. selects the next resumable READY task from the deterministic queue;
+4. patches the suspended return site with `JMP r15` (`0x50780000`) when switching;
+5. restores the selected task software frame into the live trap frame and sets
+   `frame->gpr[15]` to the selected resume PC;
+6. lets `trap.s` execute `MRET`, returning to the patched site which jumps to the
+   selected resume PC.
+
+If no resumable task remains, the scheduler patches the return site to a halt
+trampoline (`npk_task_halt`) and clears current task state. This is honest
+cooperative idle behavior, not a fabricated user process.
+
+### Limitations
+
+- Cooperative only; no preemption, timer-driven preemptive scheduling, SMP,
+  per-task MMU isolation, user loader, process/thread split, MMIO, M9, or M10.
+- Single address space/shared memory model; TCB `address_space` is recorded but
+  not activated as isolated process state.
+- Context switching requires writable return sites and assumes the current
+  single-level trap frame model; it is not a hardware task switch.
+- Freshly created tasks are kernel-managed READY records but are not started as
+  independent user contexts until a future execution/start model exists.
+- `SYS_YIELD` in the reference host syscall model is not NPK scheduling; NPK
+  scheduling is kernel behavior tested through NPK trap/syscall paths.
+- M6 caller-privilege enforcement remains limited because the exposed trap frame
+  does not carry original caller privilege.
+- The generated QEMU interpreter is not a full exception model: its MRET support
+  covers the normal return path only, while exception entry, exception-stack
+  overflow, and trap delivery for underflow/misaligned EPC are out of scope for
+  this harness.
 
 ## 13. Executable-loading architecture
 
