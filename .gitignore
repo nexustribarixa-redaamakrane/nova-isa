@@ -6,6 +6,10 @@ __pycache__/
 
 # Build and packaging artifacts
 build/
+build-cmake/
+build-cmake-*/
+build-qemu/
+build-qemu-*/
 dist/
 *.egg-info/
 .eggs/

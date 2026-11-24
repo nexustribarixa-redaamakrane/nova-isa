@@ -6,8 +6,8 @@
 ; entry point, and halts with its return value in a0.
 ;
 ; This is the boot entry only. The machine-mode exception vector is defined in
-; `trap.s`; there is still no allocator, syscall service, device driver,
-; scheduler, or user loader.
+; `trap.s`. Kernel services live in their own modules; no user loader is
+; provided.
 
 .section .text
 .global _npk_start
@@ -34,6 +34,11 @@ _npk_start:
     ; Publish the typed device/timer request entry address for post-boot tests.
     LA r1, npk_device_request
     LI r2, 0xA0F00
+    STD r1, [r2]
+
+    ; Publish the typed task request entry address for post-boot tests.
+    LA r1, npk_task_submit_request
+    LI r2, 0xB0000
     STD r1, [r2]
 
     LA ra, .Lnpk_halt

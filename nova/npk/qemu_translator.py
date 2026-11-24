@@ -21,7 +21,16 @@ import struct
 from pathlib import Path
 from typing import List, Optional
 
-from ..isa import CSR_COUNT, CSR_TABLE, INSTRUCTION_ALIGNMENT, decode_instruction
+from ..isa import (
+    CSR_COUNT,
+    CSR_TABLE,
+    ECODE as CSR_ECODE,
+    EPC as CSR_EPC,
+    EXCEPTION_CODES,
+    INSTRUCTION_ALIGNMENT,
+    PRIV as CSR_PRIV,
+    decode_instruction,
+)
 from ..nob import NobImage
 
 __all__ = ["QemuTranslationError", "build_qemu_elf", "QEMU_LAYOUT"]
@@ -53,6 +62,10 @@ QEMU_LAYOUT = {
     "code": 0x02000000,
     "done": 0x8F0000,
     "steps": 0x8F0008,
+    "error_pc": 0x8F0010,
+    "error_word": 0x8F0018,
+    "ex_depth": 0x8F0020,
+    "ex_stack": 0x8F0100,  # 32 entries * 32 bytes: epc, ecode, ecause, priv
 }
 
 _DONE_MAGIC = 0x4E564D51  # "QMVN" little-endian
@@ -60,7 +73,7 @@ _ERROR_MAGIC = 0xDEADBEEF
 _REGS_SIZE = 32 * 8
 
 # x86-64 register numbers used by the emitter.
-_RAX, _RCX, _RDX = 0, 1, 2
+_RAX, _RCX, _RDX, _RBX, _RDI = 0, 1, 2, 3, 7
 _R15 = 15
 
 
@@ -341,10 +354,63 @@ class _NovaTranslator:
     def _emit_error(self) -> None:
         self._error_addr = self.code.address
         e = self.code
-        e.mov_ri(_RAX, _ERROR_MAGIC)
+        # RDI carries the failing Nova PC; helpers may freely overwrite RAX.
+        e.mov_ri(_RDX, QEMU_LAYOUT["error_pc"])
+        e.emit(0x48, 0x89, 0x3A)                            # mov [rdx],rdi
+        e.mov_ri(_RCX, _ERROR_MAGIC)
         e.mov_ri(_RDX, QEMU_LAYOUT["done"])
-        e.emit(0x48, 0x89, 0x02)                            # mov [rdx],rax
+        e.emit(0x48, 0x89, 0x0A)                            # mov [rdx],rcx
         e.hlt()
+
+    def _emit_exception_return(self) -> None:
+        """Model Nova MRET/IRET shared semantics against hidden exception stack.
+
+        Mirrors emulator._exception_return: checks EPC alignment, requires
+        non-empty exception stack, pops frame (epc,ecode,ecause,priv), sets
+        ECODE=NONE, EPC=epc, PRIV=priv, and transfers to epc.
+        """
+        e = self.code
+        # RDI holds the failing Nova PC for any error exit; do not clobber it.
+        # load_csr/store_csr require RDX to hold the CSR-file base.
+        # Check EPC CSR alignment (architectural check in _exception_return).
+        e.mov_ri(_RDX, QEMU_LAYOUT["csrs"])
+        e.load_csr(_RAX, CSR_EPC)
+        e.emit(0x48, 0xA9)                                  # test rax,3
+        e.emit_bytes(_imm32(INSTRUCTION_ALIGNMENT - 1))
+        e.jcc_rel(0x85, self._error_addr)                   # jne error
+        # depth at ex_depth
+        e.mov_ri(_RDX, QEMU_LAYOUT["ex_depth"])
+        e.emit(0x48, 0x8B, 0x02)                            # mov rax,[rdx]
+        e.test_rr(_RAX, _RAX)
+        e.jcc_rel(0x84, self._error_addr)                   # je error (underflow)
+        e.sub_ri(_RAX, 1)
+        e.emit(0x48, 0x89, 0x02)                            # depth--
+        # entry = ex_stack + depth*32
+        e.emit(0x48, 0xC1, 0xE0, 0x05)                      # shl rax,5
+        e.mov_ri(_RCX, QEMU_LAYOUT["ex_stack"])
+        e.add_rr(_RAX, _RCX)                                # rax=entry
+        # epc
+        e.emit(0x48, 0x8B, 0x18)                            # mov rbx,[rax]
+        # priv
+        e.emit(0x48, 0x8B, 0x48, 0x18)                      # mov rcx,[rax+24]
+        # Restore saved context into the CSR file (RDX must be its base).
+        e.mov_ri(_RDX, QEMU_LAYOUT["csrs"])
+        e.store_csr(CSR_PRIV, _RCX)
+        # ECODE = NONE (0)
+        e.mov_ri(_RCX, EXCEPTION_CODES["NONE"])
+        e.store_csr(CSR_ECODE, _RCX)
+        # EPC = epc
+        e.store_csr(CSR_EPC, _RBX)
+        # jump to epc
+        e.mov_rr(_RAX, _RBX)
+        e.mov_ri(_RCX, self.image_base)
+        e.sub_rr(_RAX, _RCX)
+        e.cmp_ri(_RAX, len(self.image.image))
+        e.jcc_rel(0x83, self._error_addr)
+        e.emit(0x48, 0xA9)
+        e.emit_bytes(_imm32(3))
+        e.jcc_rel(0x85, self._error_addr)
+        e.jmp_rel(self._dispatch_addr)
 
     def _emit_dispatch_target(self, target: int) -> None:
         e = self.code
@@ -393,6 +459,23 @@ class _NovaTranslator:
             e.jcc_rel(0x84, self._error_addr)               # je error
             e.emit(0x48, 0x99)                              # cqo
             e.emit(0x48, 0xF7, 0xF9)                        # idiv rcx
+        elif kind == "udiv":
+            e.test_rr(_RCX, _RCX)
+            e.jcc_rel(0x84, self._error_addr)               # je error
+            e.emit(0x48, 0x31, 0xD2)                        # xor rdx,rdx
+            e.emit(0x48, 0xF7, 0xF1)                        # div rcx
+        elif kind == "rem":
+            e.test_rr(_RCX, _RCX)
+            e.jcc_rel(0x84, self._error_addr)               # je error
+            e.emit(0x48, 0x99)                              # cqo
+            e.emit(0x48, 0xF7, 0xF9)                        # idiv rcx
+            e.mov_rr(_RAX, _RDX)
+        elif kind == "urem":
+            e.test_rr(_RCX, _RCX)
+            e.jcc_rel(0x84, self._error_addr)               # je error
+            e.emit(0x48, 0x31, 0xD2)                        # xor rdx,rdx
+            e.emit(0x48, 0xF7, 0xF1)                        # div rcx
+            e.mov_rr(_RAX, _RDX)
         elif kind == "shl":
             e.and_ri(_RCX, 0x3F)
             e.emit(0x48, 0xD3, 0xE0)                        # shl rax,cl
@@ -469,7 +552,7 @@ class _NovaTranslator:
             e.cmp_ri(_RCX, 3)
             e.jcc_rel(0x87, self._error_addr)  # ja error
         if csr is not None and csr.align4:
-            e.emit(0x48, 0xA9)                 # test rcx, 3
+            e.emit(0x48, 0xF7, 0xC1)           # test rcx, 3
             e.emit_bytes(_imm32(3))
             e.jcc_rel(0x85, self._error_addr)  # jne error
         if csr is not None and csr.mask != 0xFFFFFFFFFFFFFFFF:
@@ -538,6 +621,7 @@ class _NovaTranslator:
             self.blocks[index] = self.code.address
             self._emit_counter()
             if decoded is None:
+                self.code.mov_ri(_RDI, address)
                 self.code.jmp_rel(self._error_addr)
                 continue
             try:
@@ -579,6 +663,8 @@ class _NovaTranslator:
         mnemonic = decoded.mnemonic
         e = self.code
 
+        # Keep failing Nova PC in RDI; arithmetic helpers overwrite RAX/RCX.
+        e.mov_ri(_RDI, address)
         if mnemonic in {"NOP", "FENCE"}:
             return
         if mnemonic in {"CSRR", "CSRW"}:
@@ -596,9 +682,18 @@ class _NovaTranslator:
             rs1 = decoded.register("rs1")
             self._emit_binary_reg(rd, rs1, rs1, "mov")
             return
+        if mnemonic == "NOT":
+            rd = decoded.register("rd")
+            rs1 = decoded.register("rs1")
+            e.load_reg(_RAX, rs1)
+            e.emit(0x48, 0xF7, 0xD0)                        # not rax
+            if rd:
+                e.store_reg(rd, _RAX)
+            return
 
         r_type = {
-            "ADD": "add", "SUB": "sub", "MUL": "mul", "DIV": "div",
+            "ADD": "add", "SUB": "sub", "MUL": "mul", "DIV": "div", "UDIV": "udiv",
+            "REM": "rem", "UREM": "urem",
             "AND": "and", "OR": "or", "XOR": "xor",
             "SHL": "shl", "SHR": "shr", "SAR": "sar",
         }
@@ -664,6 +759,13 @@ class _NovaTranslator:
             return
         if mnemonic == "RET":
             self._emit_indirect_jump(31)
+            return
+        if mnemonic == "MRET":
+            self._emit_exception_return()
+            return
+        if mnemonic == "TLBI":
+            # NPK boot uses TLBI as a TLB barrier in a non-paging runtime.
+            # This QEMU shadow has no software TLB; architectural no-op.
             return
 
         raise QemuTranslationError(f"unsupported instruction {mnemonic}")

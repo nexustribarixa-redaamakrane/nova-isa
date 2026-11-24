@@ -73,6 +73,16 @@ struct NpkOperation {
     npk_u64 device_arg[4];
     npk_u64 device_evidence;
     npk_u64 device_error;
+    /* Milestone 8 task arguments and committed-evidence helpers. */
+    npk_u64 task_id;
+    npk_u64 task_parent;
+    npk_u64 task_entry;
+    npk_u64 task_stack;
+    npk_u64 task_stack_size;
+    npk_u64 task_arg;
+    npk_u64 task_address_space;
+    npk_u64 task_evidence;
+    npk_u64 task_error;
 };
 
 /* Milestone 6 syscall integration points used by the processing core. */
@@ -88,6 +98,10 @@ void npk_core_set_device_arguments(npk_u64 slot, npk_u64 target,
                                    npk_u64 kind, npk_u64 capability,
                                    npk_u64 owner, npk_u64 object,
                                    npk_u64 *args);
+void npk_core_set_task_arguments(npk_u64 slot, npk_u64 task_id,
+                                 npk_u64 parent, npk_u64 entry,
+                                 npk_u64 stack, npk_u64 stack_size,
+                                 npk_u64 arg, npk_u64 address_space);
 
 /* Milestone 5 object payload services over Milestone 4 memory state. */
 int npk_memory_region_owned_by(npk_u64 region_id, npk_u64 owner);
@@ -103,6 +117,8 @@ npk_u64 npk_core_operation_syscall_error(npk_u64 slot);
 npk_u64 npk_core_operation_syscall_child_receipt(npk_u64 slot);
 npk_u64 npk_core_operation_device_evidence(npk_u64 slot);
 npk_u64 npk_core_operation_device_error(npk_u64 slot);
+npk_u64 npk_core_operation_task_evidence(npk_u64 slot);
+npk_u64 npk_core_operation_task_error(npk_u64 slot);
 void npk_object_clear_receipt_ext(npk_u64 index);
 void npk_object_sync_receipt_ext(struct NpkOperation *op, npk_u64 index);
 int npk_object_selftest(void);
@@ -135,5 +151,17 @@ npk_u64 npk_memory_user_physical(npk_u64 address, npk_u64 access,
 /* Milestone 6 bounded console sink counters used by the M7 device backend. */
 npk_u64 npk_syscall_write_log_count(void);
 void npk_syscall_write_log_advance(npk_u64 count);
+
+/* Milestone 8 task manager integration points used by the processing core,
+ * syscall path, and trap return hook. */
+int npk_task_init(void);
+npk_u64 npk_task_validate(struct NpkOperation *op);
+npk_u64 npk_task_execute(struct NpkOperation *op);
+npk_u64 npk_task_commit(struct NpkOperation *op);
+int npk_task_current_id(npk_u64 *out_id);
+int npk_task_schedule(struct NpkTrapFrame *frame, npk_u64 cause,
+                      npk_u64 *out_resume_pc);
+npk_u64 npk_task_switch_trampoline(void);
+npk_u64 npk_task_halt_pc(void);
 
 #endif

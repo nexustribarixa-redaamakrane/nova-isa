@@ -17,6 +17,7 @@ int npk_object_init(void);
 int npk_object_selftest(void);
 int npk_syscall_init(void);
 int npk_device_init(void);
+int npk_task_init(void);
 
 int npk_main(void)
 {
@@ -42,6 +43,10 @@ int npk_main(void)
         return status;
     }
     status = npk_device_init();
+    if (status != 0) {
+        return status;
+    }
+    status = npk_task_init();
     if (status != 0) {
         return status;
     }

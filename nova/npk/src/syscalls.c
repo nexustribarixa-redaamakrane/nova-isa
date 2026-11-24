@@ -11,10 +11,11 @@
  * Nova ISA v1.0 does not expose the pre-trap privilege in the software trap
  * frame; the recorded handler privilege is always machine mode. The subsystem
  * validates that machine-mode handler context, but it cannot claim caller
- * privilege enforcement. There is no process model or scheduler here. SYS_EXIT
- * and SYS_YIELD record policy requests without terminating or scheduling
- * anything, and SYS_WRITE publishes to the bounded console sink owned by the
- * Milestone 7 device backend.
+ * privilege enforcement. SYS_EXIT and SYS_YIELD are admitted through the normal
+ * syscall lifecycle and, when successful, reach the Milestone 8 cooperative
+ * scheduler hook at trap return. SYS_WRITE publishes to the bounded console
+ * sink owned by the Milestone 7 device backend. Unsupported caller-privilege
+ * enforcement is not fabricated; this remains a documented M6/M8 limitation.
  */
 
 #include "npk_core.h"

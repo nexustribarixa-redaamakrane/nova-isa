@@ -158,6 +158,30 @@ DEVICE_SCRATCH_ADDRESS = 0xA3A00
 DEVICE_SCRATCH_SIZE = 64
 DEVICE_LAYOUT_LIMIT = 0xB0000
 
+#: Milestone 8 task and cooperative scheduling observation regions. These are
+#: ordinary kernel RAM regions in the free gap after M7. They record typed task
+#: operations, task control blocks, ready queues, and scheduler evidence. No
+#: preemption, SMP, user loader, or process isolation is declared.
+TASK_ENTRY_ADDRESS = 0xB0000
+TASK_STATE_ADDRESS = 0xB0010
+TASK_STATE_SIZE = 128
+TASK_STATE_MAGIC = 0x4E504B4B  # "NPKK" in little-endian byte order
+TASK_STATE_VERSION = 1
+TASK_REQUEST_ADDRESS = 0xB0090
+TASK_REQUEST_SIZE = 96
+TASK_RESPONSE_ADDRESS = 0xB00F0
+TASK_RESPONSE_SIZE = 64
+TASK_TABLE_ADDRESS = 0xB0130
+# 17 scalar words + 15 reserved + 38 frame words = 560 bytes; stride 576.
+TASK_TCB_SIZE = 576
+TASK_SLOTS = 8
+TASK_READY_QUEUE_ADDRESS = 0xB1D30
+TASK_READY_QUEUE_ENTRY_SIZE = 16
+TASK_READY_QUEUE_SLOTS = 8
+TASK_RECEIPT_TABLE_ADDRESS = 0xB1DB0
+TASK_RECEIPT_SLOTS = 32
+TASK_LAYOUT_LIMIT = 0xB2DB0
+
 #: NPK-declared physical arena. NovaMachine has no RAM-size model, so this is a
 #: kernel policy region over sparse address space, not a hardware frame pool.
 PHYSICAL_ARENA_BASE = 0xC0000
@@ -279,6 +303,24 @@ __all__ = [
     "DEVICE_SCRATCH_ADDRESS",
     "DEVICE_SCRATCH_SIZE",
     "DEVICE_LAYOUT_LIMIT",
+    "TASK_ENTRY_ADDRESS",
+    "TASK_STATE_ADDRESS",
+    "TASK_STATE_SIZE",
+    "TASK_STATE_MAGIC",
+    "TASK_STATE_VERSION",
+    "TASK_REQUEST_ADDRESS",
+    "TASK_REQUEST_SIZE",
+    "TASK_RESPONSE_ADDRESS",
+    "TASK_RESPONSE_SIZE",
+    "TASK_TABLE_ADDRESS",
+    "TASK_TCB_SIZE",
+    "TASK_SLOTS",
+    "TASK_READY_QUEUE_ADDRESS",
+    "TASK_READY_QUEUE_ENTRY_SIZE",
+    "TASK_READY_QUEUE_SLOTS",
+    "TASK_RECEIPT_TABLE_ADDRESS",
+    "TASK_RECEIPT_SLOTS",
+    "TASK_LAYOUT_LIMIT",
     "PHYSICAL_ARENA_BASE",
     "PHYSICAL_ARENA_SIZE",
     "MEMORY_PAGE_SIZE",

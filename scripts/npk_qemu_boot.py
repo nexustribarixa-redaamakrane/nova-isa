@@ -193,7 +193,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             data = dump_path.read_bytes()
             marker = _read_u64(data, qt.QEMU_LAYOUT["done"])
             if marker == _ERROR_MAGIC:
-                raise QemuBootError("Nova translator reached its error handler")
+                err_pc = _read_u64(data, qt.QEMU_LAYOUT["error_pc"])
+                err_word = 0
+                try:
+                    err_word = _read_u64(data, qt.QEMU_LAYOUT["shadow"] + err_pc)
+                except QemuBootError:
+                    pass
+                raise QemuBootError(
+                    f"Nova translator reached its error handler at pc=0x{err_pc:x} word=0x{err_word & 0xFFFFFFFF:x}")
             if marker == _DONE_MAGIC:
                 steps = _read_u64(data, qt.QEMU_LAYOUT["steps"])
                 result = _read_guest_bytes(
