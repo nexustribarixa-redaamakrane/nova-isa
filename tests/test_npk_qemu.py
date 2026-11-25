@@ -36,6 +36,10 @@ def test_qemu_layout_keeps_shadow_host_and_observation_regions_apart():
     assert layout["code"] > layout["shadow"] + layout["shadow_size"]
     assert layout["harness_base"] < layout["table"] < layout["code"]
     assert layout["done"] > layout["shadow"] + layout["shadow_size"]
+    # The table grows with the image; even a maximum-size image must not reach
+    # the step/done/error metadata used by the harness and boot validator.
+    max_table_end = layout["table"] + (layout["shadow_size"] // 4) * 8
+    assert max_table_end <= layout["done"]
 
 
 def test_generated_elf_loads_real_image_into_nova_shadow(tmp_path):
