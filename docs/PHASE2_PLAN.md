@@ -842,31 +842,43 @@ the recorded gates.
 
 ## Milestone 9 — Executable loading and user execution
 
+**Status: COMPLETE.** See `docs/NPK_MILESTONE9_REPORT.md` for the final
+validated results.
+
 **Objective.** Load and run user `.nob` images under NPK.
 
 **Dependencies.** Milestones 1–8.
 
-**Files likely to change.** `nova/npk/loader.py`, user stack/entry setup,
-`tests/test_npk_loader.py`, examples, architecture docs.
+**Implemented files.** `nova/npk/src/exec.c`, `nova/npk/src/exec.s`,
+`nova/npk/executables.py`, `nova/npk/layout.py`, `nova/npk/core.py`, the existing
+M4/M5/M8 helper modules, `tests/test_npk_executables.py`,
+`scripts/npk_validate.py`, and the NPK architecture/validation documentation.
 
 **Implementation scope.**
 
-- `.nob` header and flags validation.
-- Image-byte mapping into a user address space.
-- Stack initialization, entry setup, privilege transition, and termination.
-- Unsupported-feature diagnostics.
+- Typed `LOAD`, `START`, `QUERY`, and `RELEASE` operations through the real
+  processed kernel lifecycle and dedicated receipts/reason codes.
+- Native `.nob` v1 header, flags, alignment, size, base, and entry validation.
+- Image-byte copying through an M5 region-object handle into an M4 page.
+- M8 task binding, `VMLAUNCH`, user `SCALL`, VM-exit recording, task termination,
+  and deterministic exit status.
+- Explicit rejection of unsupported flags, wrong owners/permissions/objects,
+  live mappings, stale IDs, and exhausted records/receipts.
 
-**Tests.** Valid image, bad magic/flags/size/entry, unmapped range, permission
-enforcement, user-to-kernel syscall path, exit status.
+**Tests.** Valid full lifecycle, malformed containers, bad source windows, bad
+handles/owners/permissions/objects, stale IDs, mapping validation, slot and
+receipt exhaustion, VM-exit evidence, guest trap failure, task termination,
+receipt stage traces, and M1–M8 regressions.
 
 **Acceptance criteria.** A user program runs through NPK's MMU and syscall path
 and terminates deterministically.
 
-**Known limitations.** No relocations, dynamic loader, shared libraries,
-`.nod`, or graphical shell.
+**Known limitations.** No relocations, dynamic loader, shared libraries, Nova
+ELF compatibility, `.nod`, graphical shell, per-process isolation, preemptive
+scheduling, or native-QEMU user execution.
 
 **Completion conditions.** Loader contract documented, tests green, regression
-green, committed.
+green, committed and pushed.
 
 ## Milestone 10 — Integrated validation and Phase 2 closeout
 

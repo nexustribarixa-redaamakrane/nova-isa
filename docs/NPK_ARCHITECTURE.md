@@ -886,10 +886,15 @@ image. Its long-mode stub interprets Nova instructions in generated code. The
 Nova image is placed in a 1 MiB guest-physical shadow at `0x100000`, and the
 interpreter adds that offset to Nova data addresses; Nova software therefore
 sees its architectural stack, marker, receipt, and vector addresses. Generated
-interpreter code is placed above the shadow to avoid self-overwrite.
+interpreter code is placed above the shadow to avoid self-overwrite. The
+indirect-jump dispatch table grows with the image, so Milestone 9 moves the
+harness step/done/error metadata from `0x8F0000` to `0xB00000`; even a maximum
+1 MiB image leaves the table below that boundary. Translator construction now
+rejects any image that would make the table overlap the metadata.
 
-For Milestone 8 the translator also covers `UDIV`, `REM`, `UREM`, `NOT`, `RET`,
-`MRET`, and `TLBI`. `TLBI` is an explicit no-op barrier because this interpreter
+For Milestone 9 the translator coverage remains the Milestone 8 set: `UDIV`,
+`REM`, `UREM`, `NOT`, `RET`, `MRET`, and `TLBI`. `TLBI` is an explicit no-op
+barrier because this interpreter
 has no software TLB. Translator errors record the failing Nova PC and word; the
 boot blocker was diagnosed this way as `UDIV` at PC `0x67890`, word `0x339d000`.
 The emitted normal MRET return path restores EPC, ECODE, and privilege from a
@@ -1170,13 +1175,14 @@ cooperative idle behavior, not a fabricated user process.
 ### Limitations
 
 - Cooperative only; no preemption, timer-driven preemptive scheduling, SMP,
-  per-task MMU isolation, user loader, process/thread split, MMIO, M9, or M10.
+  per-task MMU isolation, process/thread split, MMIO, or M10.
 - Single address space/shared memory model; TCB `address_space` is recorded but
-  not activated as isolated process state.
+  not activated as isolated process state. M9 selects an ASID for user launches
+  but does not add per-process isolation beyond the existing M4 page tables.
 - Context switching requires writable return sites and assumes the current
   single-level trap frame model; it is not a hardware task switch.
-- Freshly created tasks are kernel-managed READY records but are not started as
-  independent user contexts until a future execution/start model exists.
+- Freshly created tasks are kernel-managed READY records. They are started only
+  by an explicit M9 `EXEC_START` operation, never automatically at creation.
 - `SYS_YIELD` in the reference host syscall model is not NPK scheduling; NPK
   scheduling is kernel behavior tested through NPK trap/syscall paths.
 - M6 caller-privilege enforcement remains limited because the exposed trap frame
@@ -1188,21 +1194,75 @@ cooperative idle behavior, not a fabricated user process.
 
 ## 13. Executable-loading architecture
 
-The NPK loader consumes `.nob` images because that is the implemented Nova
-executable format. Its responsibilities will be:
+Milestone 9 implements executable processing for the one native Nova executable
+container that exists in this repository: `.nob` v1. The loader is a typed NPK
+subsystem, not a host helper call and not a second object manager. Every
+`LOAD`, `START`, `QUERY`, and `RELEASE` request traverses the shared processing
+core `ADMIT → VALIDATE → EXECUTE → COMMIT → COMPLETE` lifecycle and publishes a
+dedicated bounded receipt. No ISA instruction, ABI register convention, or
+syscall number changed.
 
-1. validate magic, version, flags, alignment, size, and entry range;
-2. reject unsupported flags rather than guessing their meaning;
-3. allocate and copy image bytes into the target address space;
-4. validate permissions for code and data regions;
-5. initialize a stack;
-6. set the entry PC and privilege;
-7. define termination and status reporting;
-8. reject relocations or dynamic features, which `.nob` does not carry.
+### 13.1 Native container contract
 
-There is no dynamic loader, shared library format, debug-container-based ELF
-replacement, or userland shell in Phase 2. `.nod` and `.nop` are reserved names
-with no implemented format.
+A `.nob` v1 image is a flat container with `NOBV` magic at offset 0, a `u16`
+version at offset 4, a `u16` flags word at offset 6, `image_base` at 8, `entry`
+at 16, `image_size` at 24, and image bytes at offset 32. Its exact length is
+`32 + image_size`. M9 accepts only version 1, flags 0, a canonical page-aligned
+base, a 4-byte-aligned entry inside the image range, a nonzero image no larger
+than one page, and an exact source-length match. Unsupported flags are rejected;
+their meaning is never guessed.
+
+There is no Nova ELF loader, dynamic loader, relocation processing, shared
+library format, debug-container-based ELF replacement, userland shell, `.nod`
+module ABI, or `.nop` format. Those remain outside Phase 2.
+
+### 13.2 Observation and execution layout
+
+- Entry pointer at `0xB3000`; state at `0xB3010` (128 bytes); request at
+  `0xB3090` (96 bytes); response at `0xB30F0` (64 bytes).
+- Eight 144-byte image records at `0xB3130`; sixteen 128-byte receipts at
+  `0xB4000`; 128-byte launch context at `0xB4800`; 64-byte host register save
+  at `0xB4880`.
+- Bounded staging window at `0xB5000` with 0xB000-byte capacity; M9 layout ends
+  before `0xC0000`, the M4 physical arena base.
+- Typed operations are `OP_EXEC_LOAD=38`, `OP_EXEC_START=39`,
+  `OP_EXEC_QUERY=40`, and `OP_EXEC_RELEASE=41`.
+- Dedicated reason codes `94..115` distinguish malformed requests, containers,
+  sources, image fields, handles, objects, owners, permissions, tasks, states,
+  unsupported features, exhaustion, mappings, contexts, launch failures, traps,
+  commit failures, and stale IDs.
+
+### 13.3 Integration with M4, M5, and M8
+
+`LOAD` resolves an M5 memory-region object through its typed handle, verifies
+owner and execute permission through read-only M5 services, resolves the M4
+region through read-only M4 services, and copies validated image bytes into the
+allocated physical page. It rejects a region that is already mapped rather than
+overwriting a live translation.
+
+`START` requires a `LOADED` image owned by the requester, a matching M5 handle
+and region, a valid M8 task whose owner matches, and an M4 address space with
+user-readable/executable code at `image_base` and user-readable/writable stack
+at `image_base + 0x1000`. `npk_task_bind_execution()` sets the TCB entry, stack,
+arg, ASID, `RUNNING` state, and current-task field. The launcher programs guest
+`vpc`, `vpriv`, and `vptbr` and executes a real `VMLAUNCH`.
+
+Guest execution enters user privilege at the image entry with a deterministic
+register file and stack. The observed guest `SCALL` produces an architectural
+VM exit (`VEXIT`, `SYSTEM_CALL`). The host saves the exit cause and `r1` exit
+status, calls `npk_task_finish_execution()` to terminate the M8 task, commits the
+image record, and returns the exit code. A non-`SCALL` exit or failed host resume
+is recorded as `LAUNCH_FAILED`/`TRAP` and leaves the image `FAILED`; no `MRET`
+frame is fabricated.
+
+The QEMU boot harness remains a generated x86-64 interpreter of Nova bytecode.
+Its normal boot path has no exception-frame producer and does not implement
+`SCALL`, `TRAP`, `IRET`, or VM instructions. M9 user execution is therefore
+validated in the reference emulator through real Nova `VMLAUNCH` and `SCALL`
+instructions; QEMU boot continues to validate the unchanged kernel boot image,
+step count, and shadow memory comparison. The M9 image enlarged the interpreter
+dispatch table past the old harness metadata addresses, so metadata was moved
+above the maximum table extent and a layout assertion prevents recurrence.
 
 ## 14. Debugging facilities
 

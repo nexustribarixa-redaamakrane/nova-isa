@@ -106,11 +106,12 @@ python scripts/npk_validate.py
 ```
 
 It runs NPK boot/build, core, exception/trap, memory, objects, syscalls,
-devices/timers, device/core integration, task/execution, and QEMU-harness tests,
-then the unchanged Phase 1 regression suite. NPK validation is green only when
-both stages pass. Optional QEMU boot evidence is built separately by the NPK
-tooling and is reported honestly as emulator/QEMU-harness evidence, not
-hardware/native-QEMU evidence.
+devices/timers, device/core integration, task/execution,
+executable-processing/user-execution, and QEMU-harness tests, then the unchanged
+Phase 1 regression suite. NPK validation is green only when both stages pass.
+Optional QEMU boot evidence is built separately by the NPK tooling and is
+reported honestly as emulator/QEMU-harness evidence, not hardware/native-QEMU
+evidence.
 
 ### Final Milestone 8 results
 
@@ -132,3 +133,30 @@ The final combined tree for Milestone 8 produced these results:
 The CTest exit status is not counted as test coverage: no tests were discovered.
 QEMU boot evidence comes from a generated x86-64 interpreter executing Nova
 bytecode, not native Nova CPU support in QEMU.
+
+### Final Milestone 9 results
+
+The final combined tree for Milestone 9 produced these results:
+
+| Command | Result |
+| --- | --- |
+| `python scripts/npk_validate.py` | PASS: NPK stage 195 passed; phase1 `full_suite` 2440 passed |
+| `python scripts/phase1_validate.py` | PASS: `full_suite` 2440 passed |
+| `python -m pytest -q` | PASS: 2440 passed |
+| `python -m compileall -q nova scripts tests` | PASS (no output) |
+| `python -m pytest -q tests/test_documentation.py` | PASS: 17 passed |
+| `python -m pytest -q tests/test_npk*.py` | PASS: 195 passed |
+| `python -m pytest -q tests/test_npk_qemu.py` | PASS: 7 passed |
+| `python scripts/npk_qemu_boot.py --build-dir build-qemu --timeout 120` | PASS: exact step count and shadow memory |
+| `python scripts/npk_qemu_boot.py --build-dir build-qemu-m8 --timeout 120` | PASS: exact step count and shadow memory |
+| `cmake -S . -B build-cmake-mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release` | PASS |
+| `cmake --build build-cmake-mingw -j 4` | PASS: `npk.nob` rebuilt |
+| `ctest --test-dir build-cmake-mingw --output-on-failure -j 4` | Exit 0, but reports `No tests were found!!!`; no tests executed |
+| `git diff --check` | PASS (no whitespace errors; line-ending normalization warnings only) |
+
+The M9 kernel image enlarged the QEMU dispatch table into the harness metadata
+region. Metadata was moved to `0xB00000` with a layout assertion and a
+regression test; both QEMU boot configurations again match the reference step
+count and shadow memory. CTest still discovers no tests, and M9 user execution
+is validated in the reference emulator through real `VMLAUNCH`/`SCALL`, not by
+the QEMU boot harness.
