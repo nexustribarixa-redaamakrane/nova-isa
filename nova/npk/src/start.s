@@ -41,6 +41,12 @@ _npk_start:
     LI r2, 0xB0000
     STD r1, [r2]
 
+    ; Publish the typed executable request entry for post-boot tests. This is
+    ; an observation word only; loader operations are admitted after boot.
+    LA r1, npk_exec_submit_request
+    LI r2, 0xB3000
+    STD r1, [r2]
+
     LA ra, .Lnpk_halt
     BL npk_main
 .Lnpk_halt:

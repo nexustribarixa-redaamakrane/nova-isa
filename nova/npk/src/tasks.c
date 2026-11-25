@@ -731,6 +731,116 @@ int npk_task_submit_request(void)
     return (int)state->last_status;
 }
 
+static void npk_task_ready_remove(npk_u64 task_id)
+{
+    struct NpkTaskState *state = npk_task_state();
+    npk_u64 i;
+    npk_u64 count = state->ready_count;
+
+    for (i = 0; i < count; i = i + 1) {
+        if (npk_task_ready(i)->task_id != task_id) {
+            continue;
+        }
+        for (; i + 1 < count; i = i + 1) {
+            *npk_task_ready(i) = *npk_task_ready(i + 1);
+        }
+        state->ready_count = count - 1;
+        npk_task_ready(state->ready_count)->task_id = 0;
+        npk_task_ready(state->ready_count)->task_index = NPK_TASK_NO_INDEX;
+        return;
+    }
+}
+
+npk_u64 npk_task_can_bind_execution(npk_u64 task_id, npk_u64 owner)
+{
+    struct NpkTaskState *state = npk_task_state();
+    npk_u64 index = npk_task_find_live_index(task_id);
+    struct NpkTaskTcb *task;
+
+    if (index == NPK_TASK_NO_INDEX) {
+        return NPK_REASON_TASK_NOT_FOUND;
+    }
+    task = npk_task_tcb(index);
+    if (task->owner != owner) {
+        return NPK_REASON_TASK_BAD_ID;
+    }
+    if (task->state != NPK_TASK_CREATED && task->state != NPK_TASK_READY) {
+        return NPK_REASON_TASK_BAD_TRANSITION;
+    }
+    if (state->current_task == task_id) {
+        return NPK_REASON_TASK_BAD_STATE;
+    }
+    return NPK_REASON_NONE;
+}
+
+npk_u64 npk_task_bind_execution(npk_u64 task_id, npk_u64 owner,
+                                npk_u64 entry, npk_u64 stack_base,
+                                npk_u64 stack_size, npk_u64 arg,
+                                npk_u64 address_space)
+{
+    struct NpkTaskState *state = npk_task_state();
+    npk_u64 index = npk_task_find_live_index(task_id);
+    struct NpkTaskTcb *task;
+    npk_u64 reason = npk_task_can_bind_execution(task_id, owner);
+
+    if (reason != NPK_REASON_NONE) {
+        return reason;
+    }
+    task = npk_task_tcb(index);
+    npk_task_ready_remove(task_id);
+    task->entry = entry;
+    task->stack_base = stack_base;
+    task->stack_size = stack_size;
+    task->stack_top = stack_base + stack_size;
+    task->arg = arg;
+    task->address_space = address_space;
+    task->exit_status = 0;
+    task->resume_pc = entry;
+    task->resume_patch_addr = 0;
+    task->resume_patch_word = 0;
+    task->resume_patch_active = 0;
+    task->frame[0] = 0;
+    task->frame[1] = arg;
+    task->frame[29] = task->stack_top;
+    task->frame[31] = 0;
+    task->frame[32] = 0;
+    task->frame[33] = entry;
+    task->frame[34] = 0;
+    task->frame[35] = 0;
+    task->frame[36] = 0;
+    task->frame[37] = 0;
+    /* Bit 1 records a VM-entry execution context. It is deliberately distinct
+     * from bit 0, which marks an MRET-resumable trap context in the cooperative
+     * scheduler. */
+    task->flags = 2;
+    state->current_task = task_id;
+    state->current_index = index;
+    npk_task_set_state(task, NPK_TASK_RUNNING);
+    return NPK_REASON_NONE;
+}
+
+npk_u64 npk_task_finish_execution(npk_u64 task_id, npk_u64 exit_code)
+{
+    struct NpkTaskState *state = npk_task_state();
+    npk_u64 index = npk_task_find_live_index(task_id);
+    struct NpkTaskTcb *task;
+
+    if (index == NPK_TASK_NO_INDEX) {
+        return NPK_REASON_TASK_NOT_FOUND;
+    }
+    task = npk_task_tcb(index);
+    if (task->state != NPK_TASK_RUNNING) {
+        return NPK_REASON_TASK_BAD_TRANSITION;
+    }
+    task->exit_status = exit_code;
+    if (state->current_task == task_id) {
+        state->current_task = 0;
+        state->current_index = NPK_TASK_NO_INDEX;
+    }
+    npk_task_set_state(task, NPK_TASK_TERMINATED);
+    return NPK_REASON_NONE;
+}
+
 int npk_task_init(void)
 {
     struct NpkTaskState *state = npk_task_state();

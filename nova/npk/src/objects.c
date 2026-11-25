@@ -689,6 +689,33 @@ npk_u64 npk_object_payload_for_handle(npk_u64 handle, npk_u64 owner)
     return npk_object(object_index)->payload;
 }
 
+int npk_object_handle_details(npk_u64 handle, npk_u64 owner,
+                              npk_u64 *out_type, npk_u64 *out_permissions,
+                              npk_u64 *out_payload, npk_u64 *out_refcount)
+{
+    npk_u64 decoded_owner;
+    npk_u64 generation;
+    npk_u64 index;
+    npk_u64 object_index;
+    struct NpkHandleSlot *slot;
+    struct NpkObjectHeader *header;
+
+    if (npk_handle_object(handle, &decoded_owner, &generation, &index,
+                          &object_index) == 0 || decoded_owner != owner) {
+        return 0;
+    }
+    slot = npk_handle_slot(decoded_owner, index);
+    header = npk_object(object_index);
+    if (header->state != NPK_OBJECT_STATE_ACTIVE) {
+        return 0;
+    }
+    *out_type = header->type;
+    *out_permissions = slot->permissions;
+    *out_payload = header->payload;
+    *out_refcount = header->refcount;
+    return 1;
+}
+
 npk_u64 npk_object_handle_for_id(npk_u64 object_id, npk_u64 owner)
 {
     struct NpkHandleSlot *slot;

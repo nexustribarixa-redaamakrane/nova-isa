@@ -83,6 +83,32 @@ struct NpkOperation {
     npk_u64 task_address_space;
     npk_u64 task_evidence;
     npk_u64 task_error;
+    /* Milestone 9 executable-processing arguments and evidence helpers. */
+    npk_u64 exec_owner;
+    npk_u64 exec_handle;
+    npk_u64 exec_source;
+    npk_u64 exec_source_size;
+    npk_u64 exec_image_id;
+    npk_u64 exec_task_id;
+    npk_u64 exec_asid;
+    npk_u64 exec_arg;
+    npk_u64 exec_flags;
+    npk_u64 exec_evidence;
+    npk_u64 exec_error;
+};
+
+/* Milestone 9 typed executable request arguments. The pointer form keeps the
+ * processing-core setter inside the compiler's scalar-argument limit. */
+struct NpkExecArguments {
+    npk_u64 owner;
+    npk_u64 handle;
+    npk_u64 source;
+    npk_u64 source_size;
+    npk_u64 image_id;
+    npk_u64 task_id;
+    npk_u64 asid;
+    npk_u64 arg;
+    npk_u64 flags;
 };
 
 /* Milestone 6 syscall integration points used by the processing core. */
@@ -163,5 +189,34 @@ int npk_task_schedule(struct NpkTrapFrame *frame, npk_u64 cause,
                       npk_u64 *out_resume_pc);
 npk_u64 npk_task_switch_trampoline(void);
 npk_u64 npk_task_halt_pc(void);
+npk_u64 npk_task_can_bind_execution(npk_u64 task_id, npk_u64 owner);
+npk_u64 npk_task_bind_execution(npk_u64 task_id, npk_u64 owner,
+                                npk_u64 entry, npk_u64 stack_base,
+                                npk_u64 stack_size, npk_u64 arg,
+                                npk_u64 address_space);
+npk_u64 npk_task_finish_execution(npk_u64 task_id, npk_u64 exit_code);
+
+/* Milestone 9 executable-processing integration points. */
+int npk_exec_init(void);
+npk_u64 npk_exec_validate(struct NpkOperation *op);
+npk_u64 npk_exec_execute(struct NpkOperation *op);
+npk_u64 npk_exec_commit(struct NpkOperation *op);
+void npk_core_set_exec_arguments(npk_u64 slot, struct NpkExecArguments *args);
+npk_u64 npk_core_operation_exec_evidence(npk_u64 slot);
+npk_u64 npk_core_operation_exec_error(npk_u64 slot);
+int npk_exec_vmlaunch(void);
+
+/* Milestone 9 read-only services over existing M4/M5 records. */
+int npk_memory_region_info(npk_u64 region_id, npk_u64 owner,
+                           npk_u64 *out_base, npk_u64 *out_size,
+                           npk_u64 *out_reserved);
+int npk_memory_address_space_info(npk_u64 index, npk_u64 owner,
+                                  npk_u64 *out_root, npk_u64 *out_mappings);
+npk_u64 npk_memory_user_physical_in_as(npk_u64 asid, npk_u64 owner,
+                                       npk_u64 address, npk_u64 access,
+                                       npk_u64 *out_physical);
+int npk_object_handle_details(npk_u64 handle, npk_u64 owner,
+                              npk_u64 *out_type, npk_u64 *out_permissions,
+                              npk_u64 *out_payload, npk_u64 *out_refcount);
 
 #endif

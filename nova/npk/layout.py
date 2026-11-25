@@ -17,8 +17,10 @@ MIN_KERNEL_IMAGE_BYTES = 64
 
 #: Initial kernel stack top. The stack grows down; the image must stay below it.
 BOOT_STACK_TOP = 0x80000
-#: Reserved gap beneath the boot stack.
-BOOT_STACK_GUARD = 0x10000
+#: Reserved gap beneath the boot stack. Milestone 9 adds the executable
+#: loader to the kernel image; the reduced guard still leaves more than 11 KiB
+#: of stack headroom below ``BOOT_STACK_TOP`` for the boot pipeline.
+BOOT_STACK_GUARD = 0x8000
 
 #: Eight-byte early-boot handshake word written by ``_npk_start``.
 BOOT_MARKER_ADDRESS = 0x90000
@@ -182,6 +184,36 @@ TASK_RECEIPT_TABLE_ADDRESS = 0xB1DB0
 TASK_RECEIPT_SLOTS = 32
 TASK_LAYOUT_LIMIT = 0xB2DB0
 
+#: Milestone 9 executable-processing observation regions. The loader consumes
+#: the toolchain's native flat ``.nob`` container; these regions are ordinary
+#: kernel RAM for typed requests, bounded image records, dedicated receipts,
+#: the staged container payload, and the VM-entry scratch context. There is no
+#: ELF compatibility, no second object manager, and no process isolation.
+EXEC_ENTRY_ADDRESS = 0xB3000
+EXEC_STATE_ADDRESS = 0xB3010
+EXEC_STATE_SIZE = 128
+EXEC_STATE_MAGIC = 0x4E504B45  # "NPKE" in little-endian byte order
+EXEC_STATE_VERSION = 1
+EXEC_REQUEST_ADDRESS = 0xB3090
+EXEC_REQUEST_SIZE = 96
+EXEC_RESPONSE_ADDRESS = 0xB30F0
+EXEC_RESPONSE_SIZE = 64
+EXEC_TABLE_ADDRESS = 0xB3130
+# 18 scalar words = 144 bytes; stride 144 keeps the record naturally aligned.
+EXEC_RECORD_SIZE = 144
+EXEC_SLOTS = 8
+EXEC_RECEIPT_TABLE_ADDRESS = 0xB4000
+EXEC_RECEIPT_SLOTS = 16
+EXEC_LAUNCH_CONTEXT_ADDRESS = 0xB4800
+EXEC_LAUNCH_CONTEXT_SIZE = 128
+EXEC_REGISTER_SAVE_ADDRESS = 0xB4880
+EXEC_REGISTER_SAVE_SIZE = 64
+EXEC_SOURCE_ADDRESS = 0xB5000
+#: Bounded staging window for one staged ``.nob`` container, including header.
+#: It ends before the M4 physical arena at ``0xC0000``.
+EXEC_SOURCE_SIZE = 0xB000
+EXEC_LAYOUT_LIMIT = 0xC0000
+
 #: NPK-declared physical arena. NovaMachine has no RAM-size model, so this is a
 #: kernel policy region over sparse address space, not a hardware frame pool.
 PHYSICAL_ARENA_BASE = 0xC0000
@@ -321,6 +353,27 @@ __all__ = [
     "TASK_RECEIPT_TABLE_ADDRESS",
     "TASK_RECEIPT_SLOTS",
     "TASK_LAYOUT_LIMIT",
+    "EXEC_ENTRY_ADDRESS",
+    "EXEC_STATE_ADDRESS",
+    "EXEC_STATE_SIZE",
+    "EXEC_STATE_MAGIC",
+    "EXEC_STATE_VERSION",
+    "EXEC_REQUEST_ADDRESS",
+    "EXEC_REQUEST_SIZE",
+    "EXEC_RESPONSE_ADDRESS",
+    "EXEC_RESPONSE_SIZE",
+    "EXEC_TABLE_ADDRESS",
+    "EXEC_RECORD_SIZE",
+    "EXEC_SLOTS",
+    "EXEC_RECEIPT_TABLE_ADDRESS",
+    "EXEC_RECEIPT_SLOTS",
+    "EXEC_LAUNCH_CONTEXT_ADDRESS",
+    "EXEC_LAUNCH_CONTEXT_SIZE",
+    "EXEC_REGISTER_SAVE_ADDRESS",
+    "EXEC_REGISTER_SAVE_SIZE",
+    "EXEC_SOURCE_ADDRESS",
+    "EXEC_SOURCE_SIZE",
+    "EXEC_LAYOUT_LIMIT",
     "PHYSICAL_ARENA_BASE",
     "PHYSICAL_ARENA_SIZE",
     "MEMORY_PAGE_SIZE",

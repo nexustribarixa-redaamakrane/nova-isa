@@ -790,6 +790,47 @@ int npk_memory_address_space_owned_by(npk_u64 index, npk_u64 owner)
     return 1;
 }
 
+/* Milestone 9 read-only services. The executable loader consumes existing M4
+ * records through these helpers; it never duplicates the allocator or page-table
+ * builder. */
+int npk_memory_region_info(npk_u64 region_id, npk_u64 owner,
+                           npk_u64 *out_base, npk_u64 *out_size,
+                           npk_u64 *out_reserved)
+{
+    npk_u64 index = npk_find_region(region_id);
+    struct NpkMemoryRegion *region;
+
+    if (index == NPK_NO_INDEX) {
+        return 0;
+    }
+    region = npk_region(index);
+    if (region->state != NPK_REGION_ALLOCATED || region->owner != owner) {
+        return 0;
+    }
+    *out_base = region->base;
+    *out_size = region->size;
+    *out_reserved = region->reserved;
+    return 1;
+}
+
+int npk_memory_address_space_info(npk_u64 index, npk_u64 owner,
+                                  npk_u64 *out_root, npk_u64 *out_mappings)
+{
+    struct NpkMemoryState *state = npk_state();
+    struct NpkAddressSpace *space;
+
+    if (index >= state->address_space_slots) {
+        return 0;
+    }
+    space = npk_address_space(index);
+    if (space->state != NPK_ADDRESS_SPACE_ACTIVE || space->owner != owner) {
+        return 0;
+    }
+    *out_root = space->root;
+    *out_mappings = space->mapping_count;
+    return 1;
+}
+
 int npk_memory_release_for_object(npk_u64 region_id, npk_u64 owner)
 {
     struct NpkMemoryState *state = npk_state();
@@ -831,8 +872,9 @@ int npk_memory_release_for_object(npk_u64 region_id, npk_u64 owner)
  * built by M4; it never installs a mapping or changes page-table state. The
  * explicit user-bit check is required because machine-mode translation in the
  * reference emulator does not enforce PTE_USER. */
-npk_u64 npk_memory_user_physical(npk_u64 address, npk_u64 access,
-                                 npk_u64 *out_physical)
+npk_u64 npk_memory_user_physical_in_as(npk_u64 asid, npk_u64 owner,
+                                       npk_u64 address, npk_u64 access,
+                                       npk_u64 *out_physical)
 {
     struct NpkAddressSpace *space;
     npk_u64 root;
@@ -840,13 +882,13 @@ npk_u64 npk_memory_user_physical(npk_u64 address, npk_u64 access,
     npk_u64 table;
     npk_u64 level;
 
-    if (npk_memory_address_space_owned_by(0, 1) == 0) {
+    if (npk_memory_address_space_owned_by(asid, owner) == 0) {
         return NPK_REASON_MEMORY_BAD_ADDRESS_SPACE;
     }
     if (npk_is_canonical(address) == 0) {
         return NPK_REASON_MEMORY_BAD_MAPPING;
     }
-    space = npk_address_space(0);
+    space = npk_address_space(asid);
     root = space->root;
     if (root == 0) {
         return NPK_REASON_MEMORY_BAD_ADDRESS_SPACE;
@@ -866,11 +908,21 @@ npk_u64 npk_memory_user_physical(npk_u64 address, npk_u64 access,
             (pte & NPK_PTE_READ) == 0) {
         return NPK_REASON_MEMORY_BAD_MAPPING;
     }
-    if (access == 2 && (pte & NPK_PTE_WRITE) == 0) {
+    if ((access & 2) != 0 && (pte & NPK_PTE_WRITE) == 0) {
+        return NPK_REASON_MEMORY_BAD_MAPPING;
+    }
+    if ((access & 4) != 0 && (pte & NPK_PTE_EXEC) == 0) {
         return NPK_REASON_MEMORY_BAD_MAPPING;
     }
     *out_physical = (pte & NPK_PTE_PPN_MASK) | (address & 0xFFF);
     return NPK_REASON_NONE;
+}
+
+npk_u64 npk_memory_user_physical(npk_u64 address, npk_u64 access,
+                                 npk_u64 *out_physical)
+{
+    return npk_memory_user_physical_in_as(0, 1, address, access,
+                                          out_physical);
 }
 
 static npk_u64 npk_commit_map(struct NpkOperation *op)

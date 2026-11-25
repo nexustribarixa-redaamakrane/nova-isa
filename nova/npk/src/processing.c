@@ -25,6 +25,7 @@
 #define NPK_DEVICE_RECEIPT_TABLE_ADDRESS 0xA1A00
 #define NPK_TIMER_RECEIPT_TABLE_ADDRESS 0xA2A00
 #define NPK_TASK_RECEIPT_TABLE_ADDRESS 0xB1DB0
+#define NPK_EXEC_RECEIPT_TABLE_ADDRESS 0xB4000
 
 #define NPK_PROCESS_MAGIC 0x4E504B50
 #define NPK_CORE_MAGIC 0x4E504B43
@@ -41,6 +42,7 @@
 #define NPK_DEVICE_RECEIPT_SLOTS 32
 #define NPK_TIMER_RECEIPT_SLOTS 32
 #define NPK_TASK_RECEIPT_SLOTS 32
+#define NPK_EXEC_RECEIPT_SLOTS 16
 #define NPK_STAGE_COUNT 5
 
 #define NPK_OP_BOOT_VERIFY 1
@@ -80,6 +82,10 @@
 #define NPK_OP_TASK_WAKE 35
 #define NPK_OP_TASK_QUERY 36
 #define NPK_OP_TASK_DESTROY 37
+#define NPK_OP_EXEC_LOAD 38
+#define NPK_OP_EXEC_START 39
+#define NPK_OP_EXEC_QUERY 40
+#define NPK_OP_EXEC_RELEASE 41
 
 #define NPK_BOOT_INPUT 0x4E504B31
 #define NPK_PROCESSED_BOOT_OUTPUT 0x4E504B32
@@ -210,6 +216,28 @@
 #define NPK_REASON_TASK_NOT_READY 91
 #define NPK_REASON_TASK_UNSUPPORTED 92
 #define NPK_REASON_TASK_STALE 93
+#define NPK_REASON_EXEC_BAD_REQUEST 94
+#define NPK_REASON_EXEC_BAD_CONTAINER 95
+#define NPK_REASON_EXEC_BAD_SOURCE 96
+#define NPK_REASON_EXEC_BAD_IMAGE 97
+#define NPK_REASON_EXEC_BAD_ENTRY 98
+#define NPK_REASON_EXEC_BAD_BASE 99
+#define NPK_REASON_EXEC_BAD_SIZE 100
+#define NPK_REASON_EXEC_BAD_ALIGN 101
+#define NPK_REASON_EXEC_BAD_HANDLE 102
+#define NPK_REASON_EXEC_BAD_OBJECT 103
+#define NPK_REASON_EXEC_BAD_OWNER 104
+#define NPK_REASON_EXEC_BAD_PERMISSION 105
+#define NPK_REASON_EXEC_BAD_TASK 106
+#define NPK_REASON_EXEC_BAD_STATE 107
+#define NPK_REASON_EXEC_UNSUPPORTED 108
+#define NPK_REASON_EXEC_EXHAUSTED 109
+#define NPK_REASON_EXEC_BAD_MAPPING 110
+#define NPK_REASON_EXEC_BAD_CONTEXT 111
+#define NPK_REASON_EXEC_LAUNCH_FAILED 112
+#define NPK_REASON_EXEC_TRAP 113
+#define NPK_REASON_EXEC_COMMIT 114
+#define NPK_REASON_EXEC_STALE 115
 
 #define NPK_OK 0
 #define NPK_ERR_BAD_ID 1
@@ -298,6 +326,7 @@ static npk_u64 next_syscall_receipt_index;
 static npk_u64 next_device_receipt_index;
 static npk_u64 next_timer_receipt_index;
 static npk_u64 next_task_receipt_index;
+static npk_u64 next_exec_receipt_index;
 
 static struct NpkLegacyReceipt *npk_legacy_receipt(void)
 {
@@ -406,6 +435,14 @@ static int npk_core_is_task_type(npk_u64 type)
     return 0;
 }
 
+static int npk_core_is_exec_type(npk_u64 type)
+{
+    if (type >= NPK_OP_EXEC_LOAD && type <= NPK_OP_EXEC_RELEASE) {
+        return 1;
+    }
+    return 0;
+}
+
 static npk_u64 npk_core_receipt_base(npk_u64 type)
 {
     if (type == NPK_OP_TRAP_PROCESS) {
@@ -428,6 +465,9 @@ static npk_u64 npk_core_receipt_base(npk_u64 type)
     }
     if (npk_core_is_task_type(type)) {
         return NPK_TASK_RECEIPT_TABLE_ADDRESS;
+    }
+    if (npk_core_is_exec_type(type)) {
+        return NPK_EXEC_RECEIPT_TABLE_ADDRESS;
     }
     return NPK_RECEIPT_TABLE_ADDRESS;
 }
@@ -455,6 +495,9 @@ static npk_u64 npk_core_receipt_slots(npk_u64 type)
     if (npk_core_is_task_type(type)) {
         return NPK_TASK_RECEIPT_SLOTS;
     }
+    if (npk_core_is_exec_type(type)) {
+        return NPK_EXEC_RECEIPT_SLOTS;
+    }
     return NPK_RECEIPT_SLOTS;
 }
 
@@ -480,6 +523,9 @@ static npk_u64 *npk_core_next_receipt(npk_u64 type)
     }
     if (npk_core_is_task_type(type)) {
         return &next_task_receipt_index;
+    }
+    if (npk_core_is_exec_type(type)) {
+        return &next_exec_receipt_index;
     }
     return &next_receipt_index;
 }
@@ -511,6 +557,9 @@ static int npk_core_valid_type(npk_u64 type)
         return 1;
     }
     if (npk_core_is_task_type(type)) {
+        return 1;
+    }
+    if (npk_core_is_exec_type(type)) {
         return 1;
     }
     return 0;
@@ -614,6 +663,10 @@ static void npk_core_sync_receipt(struct NpkOperation *op)
         receipt->reserved[0] = op->task_id;
         receipt->reserved[1] = op->task_evidence;
     }
+    if (npk_core_is_exec_type(op->type)) {
+        receipt->reserved[0] = op->exec_image_id;
+        receipt->reserved[1] = op->exec_evidence;
+    }
 }
 
 static void npk_core_sync_legacy(struct NpkOperation *op)
@@ -701,6 +754,7 @@ void npk_core_init(void)
     next_device_receipt_index = 0;
     next_timer_receipt_index = 0;
     next_task_receipt_index = 0;
+    next_exec_receipt_index = 0;
 
     for (i = 0; i < NPK_OP_SLOTS; i = i + 1) {
         operations[i].id = 0;
@@ -754,6 +808,17 @@ void npk_core_init(void)
         operations[i].task_address_space = 0;
         operations[i].task_evidence = 0;
         operations[i].task_error = 0;
+        operations[i].exec_owner = 0;
+        operations[i].exec_handle = 0;
+        operations[i].exec_source = 0;
+        operations[i].exec_source_size = 0;
+        operations[i].exec_image_id = 0;
+        operations[i].exec_task_id = 0;
+        operations[i].exec_asid = 0;
+        operations[i].exec_arg = 0;
+        operations[i].exec_flags = 0;
+        operations[i].exec_evidence = 0;
+        operations[i].exec_error = 0;
     }
     for (i = 0; i < NPK_PU_COUNT; i = i + 1) {
         processing_units[i].id = i;
@@ -966,6 +1031,17 @@ int npk_core_admit(npk_u64 type, npk_u64 id, npk_u64 input, npk_u64 *out_slot)
     op->task_address_space = 0;
     op->task_evidence = 0;
     op->task_error = 0;
+    op->exec_owner = 0;
+    op->exec_handle = 0;
+    op->exec_source = 0;
+    op->exec_source_size = 0;
+    op->exec_image_id = 0;
+    op->exec_task_id = 0;
+    op->exec_asid = 0;
+    op->exec_arg = 0;
+    op->exec_flags = 0;
+    op->exec_evidence = 0;
+    op->exec_error = 0;
     *next = *next + 1;
 
     processing_units[pu].state = NPK_PU_BUSY;
@@ -1098,6 +1174,27 @@ void npk_core_set_task_arguments(npk_u64 slot, npk_u64 task_id,
     op->task_error = 0;
 }
 
+void npk_core_set_exec_arguments(npk_u64 slot, struct NpkExecArguments *args)
+{
+    struct NpkOperation *op;
+
+    if (slot >= NPK_OP_SLOTS || args == 0) {
+        return;
+    }
+    op = &operations[slot];
+    op->exec_owner = args->owner;
+    op->exec_handle = args->handle;
+    op->exec_source = args->source;
+    op->exec_source_size = args->source_size;
+    op->exec_image_id = args->image_id;
+    op->exec_task_id = args->task_id;
+    op->exec_asid = args->asid;
+    op->exec_arg = args->arg;
+    op->exec_flags = args->flags;
+    op->exec_evidence = 0;
+    op->exec_error = 0;
+}
+
 static int npk_core_is_terminal(npk_u64 state)
 {
     if (state == NPK_OP_STATE_COMPLETE) {
@@ -1158,6 +1255,9 @@ static npk_u64 npk_core_validate_operation(struct NpkOperation *op)
     if (npk_core_is_task_type(op->type)) {
         return npk_task_validate(op);
     }
+    if (npk_core_is_exec_type(op->type)) {
+        return npk_exec_validate(op);
+    }
     return npk_diag_validate(op);
 }
 
@@ -1185,6 +1285,9 @@ static npk_u64 npk_core_execute_operation(struct NpkOperation *op)
     if (npk_core_is_task_type(op->type)) {
         return npk_task_execute(op);
     }
+    if (npk_core_is_exec_type(op->type)) {
+        return npk_exec_execute(op);
+    }
     return npk_diag_execute(op);
 }
 
@@ -1211,6 +1314,9 @@ static npk_u64 npk_core_commit_operation(struct NpkOperation *op)
     }
     if (npk_core_is_task_type(op->type)) {
         return npk_task_commit(op);
+    }
+    if (npk_core_is_exec_type(op->type)) {
+        return npk_exec_commit(op);
     }
     return npk_diag_commit(op);
 }
@@ -1388,6 +1494,17 @@ int npk_core_release(npk_u64 slot)
     op->task_address_space = 0;
     op->task_evidence = 0;
     op->task_error = 0;
+    op->exec_owner = 0;
+    op->exec_handle = 0;
+    op->exec_source = 0;
+    op->exec_source_size = 0;
+    op->exec_image_id = 0;
+    op->exec_task_id = 0;
+    op->exec_asid = 0;
+    op->exec_arg = 0;
+    op->exec_flags = 0;
+    op->exec_evidence = 0;
+    op->exec_error = 0;
 
     core->last_transition_status = NPK_OK;
     npk_core_publish_op(op);
@@ -1473,6 +1590,22 @@ npk_u64 npk_core_operation_task_error(npk_u64 slot)
         return 0;
     }
     return operations[slot].task_error;
+}
+
+npk_u64 npk_core_operation_exec_evidence(npk_u64 slot)
+{
+    if (slot >= NPK_OP_SLOTS) {
+        return 0;
+    }
+    return operations[slot].exec_evidence;
+}
+
+npk_u64 npk_core_operation_exec_error(npk_u64 slot)
+{
+    if (slot >= NPK_OP_SLOTS) {
+        return 0;
+    }
+    return operations[slot].exec_error;
 }
 
 int npk_core_probe_busy_unit(npk_u64 pu)

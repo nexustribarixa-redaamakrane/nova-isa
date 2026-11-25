@@ -60,12 +60,16 @@ QEMU_LAYOUT = {
     # Keep translated code far above the 1 MiB Nova shadow so an out-of-range
     # Nova store cannot overwrite the interpreter itself.
     "code": 0x02000000,
-    "done": 0x8F0000,
-    "steps": 0x8F0008,
-    "error_pc": 0x8F0010,
-    "error_word": 0x8F0018,
-    "ex_depth": 0x8F0020,
-    "ex_stack": 0x8F0100,  # 32 entries * 32 bytes: epc, ecode, ecause, priv
+    # The dispatch table starts at 0x819000 and grows by 8 bytes per image
+    # word. A maximum 1 MiB image ends it at 0xA19000, so harness metadata must
+    # live above that region; the M9 image already overlapped the old 0x8F0000
+    # addresses and corrupted step/done/error state during boot.
+    "done": 0xB00000,
+    "steps": 0xB00008,
+    "error_pc": 0xB00010,
+    "error_word": 0xB00018,
+    "ex_depth": 0xB00020,
+    "ex_stack": 0xB00100,  # 32 entries * 32 bytes: epc, ecode, ecause, priv
 }
 
 _DONE_MAGIC = 0x4E564D51  # "QMVN" little-endian
@@ -797,6 +801,9 @@ def _phdr(offset: int, vaddr: int, size: int, flags: int) -> bytes:
 
 def build_qemu_elf(image: NobImage, output: str | Path) -> Path:
     """Write a multiboot ELF containing the Nova image and its x86-64 host."""
+    table_end = QEMU_LAYOUT["table"] + (len(image.image) // 4) * 8
+    if table_end > QEMU_LAYOUT["done"]:
+        raise QemuTranslationError("dispatch table overlaps harness metadata")
     out = Path(output)
     out.parent.mkdir(parents=True, exist_ok=True)
 
