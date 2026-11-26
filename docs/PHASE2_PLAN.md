@@ -1,7 +1,11 @@
 # Phase 2 plan — NPK (Nova Processed Kernel)
 
-**Phase status:** AUTHORIZED / IN PROGRESS.  
-**Phase 1 baseline:** `0139e5a`, verified clean and synchronized before work began.  
+**Phase status:** COMPLETE / CLOSED after Milestone 10 validation.
+
+**Phase 1 baseline:** `0139e5a`, verified clean and synchronized before work began.
+
+**Phase 2 final tree:** see `docs/NPK_PHASE2_CLOSEOUT.md`.
+
 **Phase 3:** NOT STARTED.
 
 Phase 2 is exclusively NPK development. It is not OpenWindows Nova64, NovaOW,
@@ -25,9 +29,9 @@ finished. No future milestone is marked complete early.
 | 5 | Object Manager and Universal Object Model | COMPLETE | Typed object identity, handles, references, namespaces, access policy, destruction, and receipts tested |
 | 6 | Syscall and privilege subsystem | COMPLETE | In-kernel ABI dispatch with validation and error conversion tested |
 | 7 | Device abstraction and timer integration | COMPLETE | Typed device/timer lifecycle, bounded receipts, console sink, and software timer events tested without invented devices |
-| 8 | Task management and cooperative scheduling | NOT STARTED | Deterministic task creation, yield, and switch tested |
-| 9 | Executable loading and user execution | NOT STARTED | `.nob` user image loads, runs, and terminates under NPK |
-| 10 | Integrated validation and Phase 2 closeout | NOT STARTED | Full regression, NPK validation, report, clean synchronized push |
+| 8 | Task management and cooperative scheduling | COMPLETE | Deterministic task creation, yield, and switch tested |
+| 9 | Executable loading and user execution | COMPLETE | `.nob` user image loads, runs, and terminates under NPK |
+| 10 | Integrated validation and Phase 2 closeout | COMPLETE | Full regression, NPK validation, report, clean synchronized push |
 
 ## Milestone 1 — NPK architecture and boot foundation
 
@@ -821,10 +825,11 @@ error-PC diagnostics. `scripts/npk_validate.py` includes both
 bounded receipts, and syscall-integrated yield/exit are tested through real NPK
 paths; no preemption/SMP/process-isolation claims are made.
 
-**Known limitations.** Cooperative only; no preemption, timer-driven scheduling,
-SMP, per-task address-space isolation, user loader, process/thread split, MMIO,
-M9, or M10. Tasks share a single address space unless/until a future milestone
-implements isolated address-space activation. The context switch depends on
+**Known limitations (as of M8).** Cooperative only; no preemption,
+timer-driven scheduling, SMP, per-task address-space isolation, user loader,
+process/thread split, or MMIO. Later M9/M10 work added a native `.nob` loader and
+integration validation but did not add preemption, SMP, MMIO, or strong process
+isolation. Tasks share a single address space unless explicitly mapped per task. The context switch depends on
 writable return sites and single-level trap-frame assumptions. Freshly created
 tasks are kernel records/READY queue entries but are not magically started as
 user contexts without an explicit future execution/start model. M6 caller-
@@ -882,27 +887,48 @@ green, committed and pushed.
 
 ## Milestone 10 — Integrated validation and Phase 2 closeout
 
+**Status:** COMPLETE after validation. See `docs/NPK_MILESTONE10_REPORT.md` and
+`docs/NPK_PHASE2_CLOSEOUT.md` for the final validated results and scope
+classification.
+
 **Objective.** Harden, document, and close Phase 2 with repeatable validation.
 
 **Dependencies.** Milestones 1–9.
 
-**Files likely to change.** `scripts/npk_validate.py`,
-`docs/PHASE2_COMPLETION.md`, all NPK docs, README, package metadata.
+**Files changed.** `tests/test_npk_integration.py`, `scripts/npk_validate.py`,
+`nova/npk/__init__.py`, `nova/npk/core.py`, `nova/npk/src/kernel.c`,
+`nova/npk/src/npk_core.h`, `nova/npk/src/exec.c`, `nova/npk/src/devices.c`,
+`nova/npk/src/processing.c`, `docs/PHASE2_PLAN.md`,
+`docs/NPK_ARCHITECTURE.md`, `docs/VALIDATION.md`, `README.md`,
+`docs/NPK_MILESTONE9_REPORT.md`, and the two new closeout reports.
 
 **Implementation scope.**
 
-- Extend the NPK validation script to cover every subsystem.
-- Run Phase 1 validation unchanged.
-- Produce the Phase 2 completion report and honest limitation classification.
-- Review commits, documentation, and clean synchronization.
+- Added focused cross-subsystem tests for boot/core readiness, boot receipt
+  preservation, typed operations from four subsystems, memory/object lifetimes,
+  trap/syscall/task integration, devices/timers, executable load/launch/attach,
+  rejected partial state, bounded receipt exhaustion, QEMU diagnostics, and
+  Phase 1 toolchain determinism.
+- Changed `scripts/npk_validate.py` to discover every `tests/test_npk*.py` file
+  in sorted order; added meta-tests for export resolution, validator discovery,
+  Python/C operation and reason parity, and shared layout literals.
+- Fixed integration-level defects without changing frozen behavior: published
+  exports now resolve, shared admission errors live in `npk_core.h`, `exec.c`
+  uses `NPK_ERR_*` names for `npk_core_admit()` results, and the kernel init
+  comment matches the actual order.
+- Ran the full final gate matrix, both QEMU boot configurations, CMake/MinGW
+  build, CTest, and clean-tree checks recorded in the closeout.
 
-**Acceptance criteria.** Full NPK suite green, Phase 1 counts unchanged,
-documentation complete, `master` clean and equal to `origin/master`.
+**Acceptance criteria.** Full NPK suite green; Phase 1 stage groups unchanged;
+`full_suite` intentionally includes all NPK tests; documentation complete;
+`master` clean and equal to `origin/master`.
 
-**Known limitations.** Physical hardware, desktop/OpenWindows work, and Phase 3
-remain out of scope.
+**Known limitations.** No new Phase 2 capability was added: no preemption, SMP,
+MMIO, physical hardware, desktop/OpenWindows work, native-QEMU Nova support,
+ELF compatibility, dynamic linking, or Phase 3 work. Bare CTest exits 0 but
+discovers no tests, so it is not counted as test coverage.
 
-**Completion conditions.** Closeout report committed and pushed; no milestone 11
+**Completion conditions.** Closeout report committed and pushed; no Milestone 11
 created without explicit authorization.
 
 ## Rules for all milestones

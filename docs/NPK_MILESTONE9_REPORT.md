@@ -131,4 +131,6 @@ CPU or physical-hardware validation.
 - `VMLAUNCH` execution is validated in the reference emulator, not by the QEMU
   boot harness or hardware.
 - M6 caller-privilege enforcement remains limited by trap-frame visibility.
-- No M10 closeout claims are made in this milestone.
+- This report preserves the M9 results only; the later M10 integration and
+  Phase 2 closeout are documented in `docs/NPK_MILESTONE10_REPORT.md` and
+  `docs/NPK_PHASE2_CLOSEOUT.md`.

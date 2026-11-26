@@ -1,9 +1,8 @@
 # NPK — Nova Processed Kernel architecture
 
-**Status:** authoritative Phase 2 architecture baseline; Milestone 2 processing
-core, Milestone 3 exception/trap subsystem, Milestone 4 memory subsystem,
-Milestone 5 Object Manager, Milestone 6 syscall and privilege-context processing,
-and Milestone 7 expanded typed device/timer processing implemented.
+**Status:** authoritative Phase 2 architecture baseline; Milestones 1–10 are
+implemented and integrated. Milestone 10 adds cross-subsystem validation and
+closeout only, with no ISA, ABI, layout, or subsystem-semantic changes.
 
 **Kernel:** NPK — Nova Processed Kernel.  
 **Classification:** Winoid.  
@@ -41,9 +40,10 @@ committed, and receipted by a processing unit.
 The kernel work processed by NPK includes boot verification, exception and
 interrupt events, system-call requests, memory-management operations, object
 operations, device events, task transitions, and executable-loading requests.
-Boot verification, trap processing, the five memory operations, and the twelve
-object operations are implemented; system-call, device, task, and loader work
-remain architecture targets rather than implemented features.
+Boot verification, trap processing, the five memory operations, the twelve
+object operations, syscall services, typed device/timer operations, cooperative
+task operations, and native `.nob` executable operations are implemented and
+share the same processing lifecycle.
 
 An operation is *processed* only when:
 
@@ -91,23 +91,24 @@ producer -> ADMIT -> VALIDATE -> EXECUTE -> COMMIT -> COMPLETE -> receipt
   failures are never silently converted to success.
 
 A processing unit is the logical owner of one operation while it traverses the
-pipeline. Milestone 1 has exactly one fixed unit, `PU0`, and no concurrency.
-Later milestones may bind units to tasks or harts, but that is not implemented
-or claimed here.
+pipeline. Milestone 1 had one fixed unit, `PU0`; the implemented kernel has two
+sequential units, `PU0` and `PU1`, shared by all typed subsystems. Milestone 8
+binds cooperative tasks at the trap return boundary; it does not bind processing
+units to tasks, harts, or concurrent execution.
 
 ### Components responsible for processing
 
 | Component | Responsibility | Status |
 | --- | --- | --- |
-| Operation producers | Create typed work from boot/trap/memory/object/syscall/device/loader events | Boot, trap, post-boot memory, post-boot object, syscall, and device-interrupt/console producers implemented; loader producers remain future work |
+| Operation producers | Create typed work from boot/trap/memory/object/syscall/device/task/loader events | All published Phase 2 producers implemented; every producer submits to the shared processing pipeline |
 | `NpkOperation` | Carries operation code, input, stage cursor, provisional result, result, reason, receipt index, and typed evidence | Generalized typed records in Milestone 2; trap type added in Milestone 3; memory fields added in Milestone 4; stable object identity/handle/namespace fields added in Milestone 5 |
 | Processing units `PU0`/`PU1` | Own one operation each and drive stage advancement | Two sequential units in Milestone 2; memory and object operations use the same ownership model |
-| Stage handlers | Implement validate/execute/commit invariants per operation type | Boot, diagnostic, trap, five memory, twelve object, and syscall operation types implemented; device interrupts use the trap operation path |
-| Admission interface | Validates id/type, rejects duplicates, assigns a free unit, and emits a receipt | Implemented in Milestone 2; trap, memory, and object operations use the same interface |
+| Stage handlers | Implement validate/execute/commit invariants per operation type | Boot, diagnostic, trap, memory, object, syscall, device/timer, task, and executable operation types implemented |
+| Admission interface | Validates id/type, rejects duplicates, assigns a free unit, and emits a receipt | Shared by every typed Phase 2 operation; admission errors are distinct from receipt reason codes |
 | Receipt memory | Publishes stage trace and terminal result for host observation | Fixed boot receipt at `0x90008`; core log at `0x90220`; trap log at `0x90B00`; memory log at `0x92050`; object log at `0x9A190` plus extension records at `0x9EA10` |
 | Core/operation snapshots | Expose counters, unit state, and operation slots to host tests | Implemented in Milestone 2; trap state at `0x90A40` in Milestone 3; memory state at `0x90F10` in Milestone 4; object state at `0x96060` in Milestone 5 |
 | Processing coordinator | Submits work and checks the terminal result | `npk_main` and the Milestone 2 self-test; trap dispatch in `trap.c`; memory request wrapper in `memory.c`; object request wrapper in `objects.c`; device backends called from trap/syscall paths |
-| Scheduler | Chooses which unit/operation receives CPU time | Not implemented |
+| Scheduler | Chooses which cooperative task resumes at the trap return boundary | Milestone 8 cooperative scheduler implemented; no preemption, SMP, or timer-driven scheduling |
 
 Milestone 3 separated the kernel entry from this mechanism:
 `nova/npk/src/start.s` establishes the machine context, `nova/npk/src/trap.s`
@@ -852,26 +853,28 @@ task or scheduler, so it does not terminate a process or change machine state.
 
 ### 5.4 Initialization order
 
-The implemented prefix of the initialization order is:
+The implemented initialization order is:
 
 1. architecturally required boot state (`sp`, `vbar`);
 2. boot marker and the `NPK_OP_BOOT_VERIFY` pipeline;
 3. processing-core initialization and self-test;
 4. exception/trap observation state (Milestone 3);
 5. memory-manager state and published request entry (Milestone 4);
-6. object-manager state, type registry, namespace, and published request entry
-   (Milestone 5);
-7. syscall observation state and dispatch policy (Milestone 6).
+6. object-manager state, type registry, namespace, object self-test, and
+   published request entry (Milestone 5);
+7. device/timer backend (Milestone 7);
+8. cooperative task manager (Milestone 8);
+9. native executable loader (Milestone 9);
+10. syscall observation state and dispatch policy (Milestone 6).
 
-Future milestones would add, in order, scheduler and executable loader. The
-coordinator in `kernel.c` calls `npk_process_boot()`, `npk_trap_init()`,
+The coordinator in `kernel.c` calls `npk_process_boot()`, `npk_trap_init()`,
 `npk_memory_init()`, `npk_object_init()`, `npk_object_selftest()`,
-`npk_device_init()`, and `npk_syscall_init()` only. Syscall policy remains in
-`syscalls.c`, device policy in `devices.c`; the trap C dispatcher publishes
-classification and hands system-call or interrupt frames to the appropriate
-backend.
-
-Each milestone may implement only the next coherent prefix of this order.
+`npk_device_init()`, `npk_task_init()`, `npk_exec_init()`, and
+`npk_syscall_init()`, in that order, returning success only when every stage
+succeeds. Syscall policy remains in `syscalls.c`, device policy in `devices.c`;
+the trap C dispatcher publishes classification and hands system-call or
+interrupt frames to the appropriate backend. Milestone 10 deliberately did not
+reorder initialization; it aligned this documentation with the existing code.
 
 ### 5.5 Build and QEMU validation workflow
 
@@ -968,11 +971,11 @@ entry ran and that the host loaded the image at the expected base. It is a
 debug/handshake mechanism, not a kernel API.
 
 Milestone 4 enforces canonical virtual addresses, explicit R/W/X/U PTE bits,
-owner-scoped address spaces, and full `TLBI` invalidation on map/unmap. It does
-not yet implement a global low-kernel/high-user layout policy: that belongs to
-the future syscall/task/loader work. NPK currently maps both software address
-spaces through distinct roots owned by the requesting owner, and no process or
-user-executable concept exists.
+owner-scoped address spaces, and full `TLBI` invalidation on map/unmap. The
+completed kernel still has no global low-kernel/high-user layout policy: M9 uses
+explicit M4 mappings for one code page and one stack page under an M8 task.
+NPK maps both software address spaces through distinct roots owned by the
+requesting owner; it is not a process or strong user-isolation model.
 
 There is no ASID in Nova v1.0, so address-space switches use `ptbr` writes and
 the full TLB flush they cause. NPK must not claim ASID-tagged isolation.
@@ -1264,7 +1267,39 @@ step count, and shadow memory comparison. The M9 image enlarged the interpreter
 dispatch table past the old harness metadata addresses, so metadata was moved
 above the maximum table extent and a layout assertion prevents recurrence.
 
-## 14. Debugging facilities
+## 14. Phase 2 integration and closeout
+
+Milestone 10 is stabilization only. It does not add a subsystem, change an ISA
+or ABI constant, move a published layout region, or change any lifecycle rule.
+The integration contract is:
+
+- one deterministic kernel image is built and booted; a copied machine is used
+  per integration test so boot evidence remains stable and tests stay isolated;
+- all typed operations still traverse `ADMIT → VALIDATE → EXECUTE → COMMIT →
+  COMPLETE`; helper calls are used only to publish request records or observe
+  state, never to bypass processing;
+- boot marker, boot receipt, core counters, receipt tables, PU ownership, and
+  subsystem state remain coherent across memory, object, device, timer, task,
+  syscall, trap, and executable activity;
+- rejected and failed operations preserve their distinct receipts and do not
+  publish partial records or leak processing units;
+- bounded receipt exhaustion is demonstrated without blocking unrelated
+  subsystems;
+- `tests/test_npk_integration.py` is discovered automatically by
+  `scripts/npk_validate.py` along with every other `tests/test_npk*.py` file,
+  and source-level guards check Python/C operation and reason parity;
+- Phase 1 stage groups remain unchanged, while the `full_suite` gate intentionally
+  includes all NPK tests.
+
+M10 fixed integration-level defects found during the audit without altering
+frozen contracts: shared admission error constants now live in `npk_core.h`,
+`exec.c` compares `npk_core_admit()` results against `NPK_ERR_*` names rather
+than receipt reason names, the kernel initialization comment now matches the
+actual order, and the package's advertised exports resolve. Final results and
+unsupported claims are recorded in `docs/NPK_PHASE2_CLOSEOUT.md` and
+`docs/NPK_MILESTONE10_REPORT.md`.
+
+## 15. Debugging facilities
 
 NPK uses existing reference-model observability:
 
@@ -1283,7 +1318,7 @@ NPK uses existing reference-model observability:
 
 No GDB stub, hardware trace, or in-kernel debugger is claimed.
 
-## 15. Security boundaries
+## 16. Security boundaries
 
 The privilege levels alone do not guarantee isolation. Enforcement depends on:
 
@@ -1299,7 +1334,7 @@ That limitation must remain visible until MMU-backed isolation is implemented
 and tested. Host-side CSR setup APIs bypass privilege checks and are for tests
 only; they are not kernel APIs.
 
-## 16. Failure handling and panic policy
+## 17. Failure handling and panic policy
 
 Early NPK failures are reported through a deterministic panic path:
 
@@ -1311,7 +1346,7 @@ Panic behavior becomes testable in the boot milestone as a defined error state
 rather than an implicit exception. Until then, a boot helper that sees an
 unexpected emulator exception fails the test instead of silently passing.
 
-## 17. Future extension points
+## 18. Future extension points
 
 The following are architecture placeholders, not implemented features:
 

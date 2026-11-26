@@ -26,7 +26,7 @@ needed.
 | 9 | `example` | `examples/hello_runtime.c` compiled, linked, loaded, and executed | 1 passed |
 | 10 | `conformance` | Hardware-independent Nova architecture vectors | 18/18 passed |
 | 11 | `compileall` | Python syntax check for `nova`, `tests`, `scripts` | passed |
-| 12 | `full_suite` | Entire pytest suite as a final regression gate | 2245 passed |
+| 12 | `full_suite` | Entire pytest suite as a final regression gate; Phase 1 stage groups unchanged, NPK tests intentionally included | 2455 passed |
 
 The disjoint `runtime`, `library`, and `end_to_end` selections use pytest `-k`
 expressions over `tests/test_runtime.py`, so their counts can be reported
@@ -105,10 +105,9 @@ Phase 2 NPK milestones have a separate repeatable entrypoint:
 python scripts/npk_validate.py
 ```
 
-It runs NPK boot/build, core, exception/trap, memory, objects, syscalls,
-devices/timers, device/core integration, task/execution,
-executable-processing/user-execution, and QEMU-harness tests, then the unchanged
-Phase 1 regression suite. NPK validation is green only when both stages pass.
+It discovers every `tests/test_npk*.py` file in sorted order, including the
+Milestone 10 cross-subsystem suite, and then runs the unchanged Phase 1 stage
+groups. NPK validation is green only when both stages pass.
 Optional QEMU boot evidence is built separately by the NPK tooling and is
 reported honestly as emulator/QEMU-harness evidence, not hardware/native-QEMU
 evidence.
@@ -160,3 +159,29 @@ regression test; both QEMU boot configurations again match the reference step
 count and shadow memory. CTest still discovers no tests, and M9 user execution
 is validated in the reference emulator through real `VMLAUNCH`/`SCALL`, not by
 the QEMU boot harness.
+
+### Final Milestone 10 results
+
+The final Phase 2 closeout tree produced these results:
+
+| Command | Result |
+| --- | --- |
+| `python scripts/npk_validate.py` | PASS: NPK stage 210 passed; phase1 `full_suite` 2455 passed |
+| `python scripts/phase1_validate.py` | PASS: `full_suite` 2455 passed |
+| `python -m pytest -q` | PASS: 2455 passed |
+| `python -m compileall -q nova scripts tests` | PASS (no output) |
+| `python -m pytest -q tests/test_documentation.py` | PASS: 17 passed |
+| `python -m pytest -q tests/test_npk*.py` | PASS: 210 passed |
+| `python -m pytest -q tests/test_npk_qemu.py` | PASS: 7 passed |
+| `python scripts/npk_qemu_boot.py --build-dir build-qemu --timeout 300` | PASS: exact step count and shadow memory |
+| `python scripts/npk_qemu_boot.py --build-dir build-qemu-m8 --timeout 300` | PASS: exact step count and shadow memory |
+| `cmake -S . -B build-cmake-mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release` | PASS |
+| `cmake --build build-cmake-mingw -j 4` | PASS: `npk.nob` rebuilt |
+| `ctest --test-dir build-cmake-mingw --output-on-failure -j 4` | CTest exited 0; no tests were discovered or executed. |
+| `git diff --check` | PASS (no whitespace errors; line-ending normalization warnings only) |
+
+M10 added tests and validation wiring only. The fifteen new
+`tests/test_npk_integration.py` cases are included in both the 210-test NPK
+stage and the 2455-test full suite; the Phase 1 stage groups themselves are
+unchanged. See `docs/NPK_MILESTONE10_REPORT.md` and
+`docs/NPK_PHASE2_CLOSEOUT.md` for the final scope classification.
