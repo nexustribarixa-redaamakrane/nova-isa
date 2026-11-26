@@ -3,11 +3,12 @@
  *
  * The assembly entry point owns all architectural setup. `npk_main` runs the
  * boot-processing pipeline, then initializes the Milestone 3 trap observation
- * state, Milestone 4 memory subsystem, Milestone 5 object manager, Milestone 6
- * syscall service, Milestone 7 device backend, Milestone 8 task manager, and
- * Milestone 9 executable loader, returning success only when every coordinator
- * stage succeeds. Trap delivery is driven by the real Nova vector in `trap.s`;
- * syscall and device policy stay in `syscalls.c` and `devices.c`. User code is
+ * state, Milestone 4 memory subsystem, Milestone 5 object manager, Milestone 7
+ * device backend, Milestone 8 task manager, Milestone 9 executable loader, and
+ * finally the Milestone 6 syscall service, returning success only when every
+ * coordinator stage succeeds. Trap delivery is driven by the real Nova vector
+ * in `trap.s`; syscall and device policy stay in `syscalls.c` and `devices.c`.
+ * User code is
  * entered through the documented VMLAUNCH path, not a fabricated MRET frame.
  */
 

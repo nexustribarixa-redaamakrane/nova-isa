@@ -5,6 +5,25 @@ typedef unsigned long npk_u64;
 
 #define NPK_NO_INDEX 0xFFFFFFFFFFFFFFFF
 
+/* Admission errors returned by npk_core_admit(). These are deliberately distinct
+ * from reason codes published in receipts even where their numeric values match.
+ * Subsystems compare admission results against these names, never against
+ * NPK_REASON_* names. */
+#define NPK_ERR_BAD_ID 1
+#define NPK_ERR_BAD_TYPE 2
+#define NPK_ERR_DUPLICATE_ID 3
+#define NPK_ERR_NO_SLOT 4
+#define NPK_ERR_UNIT_UNAVAILABLE 5
+#define NPK_ERR_NO_RECEIPT 6
+#define NPK_ERR_BAD_SLOT 7
+#define NPK_ERR_NOT_ACTIVE 8
+#define NPK_ERR_OWNERSHIP 9
+#define NPK_ERR_INVALID_TRANSITION 10
+#define NPK_ERR_UNIT_BUSY 11
+#define NPK_ERR_UNIT_IDLE 12
+#define NPK_ERR_BAD_PU 13
+#define NPK_ERR_INCOMPLETE 14
+
 /* Milestone 3 trap frame shared by trap.c and the Milestone 6 syscall service. */
 struct NpkTrapFrame {
     npk_u64 gpr[32];
@@ -174,7 +193,8 @@ int npk_object_syscall_request(struct NpkObjectSyscallRequest *request,
 npk_u64 npk_memory_user_physical(npk_u64 address, npk_u64 access,
                                  npk_u64 *out_physical);
 
-/* Milestone 6 bounded console sink counters used by the M7 device backend. */
+/* Milestone 6 bounded console sink counters consumed at request time by the
+ * Milestone 7 device backend; this is not an initialization-order dependency. */
 npk_u64 npk_syscall_write_log_count(void);
 void npk_syscall_write_log_advance(npk_u64 count);
 

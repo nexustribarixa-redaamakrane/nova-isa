@@ -747,12 +747,12 @@ int npk_exec_submit_request(void)
     admission = npk_core_admit(request->operation, request->id,
                                request->image_id, &slot);
     if (admission != NPK_OK) {
-        if (admission == NPK_REASON_NO_SLOT ||
-                admission == NPK_REASON_NO_RECEIPT ||
-                admission == NPK_REASON_UNIT_UNAVAILABLE) {
+        if (admission == NPK_ERR_NO_SLOT ||
+                admission == NPK_ERR_NO_RECEIPT ||
+                admission == NPK_ERR_UNIT_UNAVAILABLE) {
             reason = NPK_REASON_EXEC_EXHAUSTED;
             status = NPK_REQUEST_ADMIT_FAIL;
-        } else if (admission == NPK_REASON_DUPLICATE_ID) {
+        } else if (admission == NPK_ERR_DUPLICATE_ID) {
             reason = NPK_REASON_EXEC_STALE;
             status = NPK_REQUEST_ADMIT_FAIL;
         } else {

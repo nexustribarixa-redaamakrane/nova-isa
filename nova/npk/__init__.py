@@ -1,10 +1,13 @@
 """NPK — Nova Processed Kernel.
 
-Phase 2 Milestone 3 extends the reusable processing core with a real Nova
-assembly exception vector, a 304-byte software trap frame, typed trap operations,
-and MRET return. Milestone 6 adds processed syscall services over that trap path.
-Milestone 7 adds the console sink and architectural timer/interrupt backend.
-It deliberately provides no MMIO devices, scheduler, or user loader.
+Phase 2 is complete through Milestone 10. The package exposes the bootable,
+deterministic kernel contract assembled from the reusable processing core,
+exception/trap path, memory manager, object manager, syscall services, typed
+device/timer backend, cooperative task manager, and native ``.nob`` executable
+loader. Every typed operation uses the shared
+``ADMIT → VALIDATE → EXECUTE → COMMIT → COMPLETE`` lifecycle. The kernel
+deliberately provides no MMIO devices, preemption, SMP, dynamic linking, GUI, or
+Phase 3 subsystems; see ``docs/NPK_PHASE2_CLOSEOUT.md`` for the final scope.
 """
 
 from __future__ import annotations
@@ -77,6 +80,8 @@ from .devices import (
     UNSUPPORTED_DEVICE_KINDS,
     NpkDeviceError,
     Capability,
+    InterruptRecord,
+    InterruptResult,
     DeviceState,
     DeviceOperationState,
     DeviceRegistryEntry,

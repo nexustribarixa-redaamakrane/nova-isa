@@ -240,20 +240,6 @@
 #define NPK_REASON_EXEC_STALE 115
 
 #define NPK_OK 0
-#define NPK_ERR_BAD_ID 1
-#define NPK_ERR_BAD_TYPE 2
-#define NPK_ERR_DUPLICATE_ID 3
-#define NPK_ERR_NO_SLOT 4
-#define NPK_ERR_UNIT_UNAVAILABLE 5
-#define NPK_ERR_NO_RECEIPT 6
-#define NPK_ERR_BAD_SLOT 7
-#define NPK_ERR_NOT_ACTIVE 8
-#define NPK_ERR_OWNERSHIP 9
-#define NPK_ERR_INVALID_TRANSITION 10
-#define NPK_ERR_UNIT_BUSY 11
-#define NPK_ERR_UNIT_IDLE 12
-#define NPK_ERR_BAD_PU 13
-#define NPK_ERR_INCOMPLETE 14
 
 struct NpkLegacyReceipt {
     npk_u64 magic;
